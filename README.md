@@ -49,3 +49,5 @@ Reload VS Code after installing the VSIX.
 ## Repository
 
 GitHub: https://github.com/Vetle444/MauiDeploy
+
+See `PUBLISHING.md` for GitHub clone and VS Code Marketplace publishing steps.
