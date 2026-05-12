@@ -3,7 +3,7 @@
   "displayName": "MAUI Deploy",
   "description": "Rider-like toolbar for building & deploying .NET MAUI apps",
   "version": "0.2.0",
-  "publisher": "vetle444",
+  "publisher": "DIPS",
   "license": "MIT",
   "repository": {
     "type": "git",
