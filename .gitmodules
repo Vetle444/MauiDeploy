@@ -1,0 +1,3 @@
+[submodule "MauiDeploy.Debugger/lib/debugger-libs"]
+	path = MauiDeploy.Debugger/lib/debugger-libs
+	url = https://github.com/mono/debugger-libs.git

@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# .NET
+**/bin/
+**/obj/
+**/TestResults/
+*.user
+*.suo
+.vs/
+
+# VS Code extension build output
+mauideploy-vscode/out/
+mauideploy-vscode/node_modules/
+mauideploy-vscode/*.vsix
+
+# Logs and local environment
+*.log
+.env
+.env.*
+
+# Packages
+*.nupkg
+*.snupkg

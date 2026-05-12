@@ -1,0 +1,114 @@
+{
+  "name": "mauideploy",
+  "displayName": "MAUI Deploy",
+  "description": "Rider-like toolbar for building & deploying .NET MAUI apps",
+  "version": "0.2.0",
+  "publisher": "vetle444",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Vetle444/MauiDeploy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Vetle444/MauiDeploy/issues"
+  },
+  "homepage": "https://github.com/Vetle444/MauiDeploy#readme",
+  "keywords": [
+    "maui",
+    "dotnet",
+    "debugger",
+    "ios",
+    "android"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Other"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/*.csproj"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "mauideploy",
+        "label": "MAUI Deploy",
+        "program": "./out/debugger/MauiDeploy.Debugger.dll",
+        "runtime": "dotnet",
+        "languages": [
+          "csharp"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "projectPath": { "type": "string" },
+              "configuration": { "type": "string" },
+              "platform": { "type": "string" },
+              "framework": { "type": "string" },
+              "deviceId": { "type": "string" },
+              "deviceName": { "type": "string" },
+              "programPath": { "type": "string" },
+              "debugPort": { "type": "number" }
+            }
+          }
+        }
+      }
+    ],
+    "breakpoints": [
+      { "language": "csharp" }
+    ],
+    "commands": [
+      {
+        "command": "mauideploy.run",
+        "title": "MAUI Deploy: Run",
+        "icon": "$(play)"
+      },
+      {
+        "command": "mauideploy.debug",
+        "title": "MAUI Deploy: Debug",
+        "icon": "$(bug)"
+      },
+      {
+        "command": "mauideploy.pickProject",
+        "title": "MAUI Deploy: Select Project",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "mauideploy.toggleConfig",
+        "title": "MAUI Deploy: Toggle Configuration",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "mauideploy.pickDevice",
+        "title": "MAUI Deploy: Select Device",
+        "icon": "$(device-mobile)"
+      },
+      {
+        "command": "mauideploy.openLogs",
+        "title": "MAUI Deploy: Open Logs",
+        "icon": "$(output)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "mauideploy.run",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npx @vscode/vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "*",
+    "@types/vscode": "*",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "*"
+  }
+}

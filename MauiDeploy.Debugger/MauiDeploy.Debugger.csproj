@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>MauiDeploy.Debugger</AssemblyName>
+    <RootNamespace>MauiDeploy.Debugger</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="lib/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.Shared.VSCodeDebugProtocol" Version="17.12.*" />
+    <!-- Mono.Debugger.Soft and Mono.Debugging.Soft reference Cecil with PrivateAssets="all",
+         so it doesn't flow transitively. Add an explicit reference so it's included in publish. -->
+    <PackageReference Include="Mono.Cecil" Version="0.10.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="lib/debugger-libs/Mono.Debugger.Soft/Mono.Debugger.Soft.csproj" />
+    <ProjectReference Include="lib/debugger-libs/Mono.Debugging.Soft/Mono.Debugging.Soft.csproj" />
+    <ProjectReference Include="lib/debugger-libs/Mono.Debugging/Mono.Debugging.csproj" />
+  </ItemGroup>
+
+</Project>
