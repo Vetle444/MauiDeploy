@@ -1,9 +1,23 @@
 using System.Net;
+using System.Reflection;
+using System.Text.Json;
 using Mono.Debugging.Soft;
 using Mono.Debugging.Client;
 using Microsoft.VisualStudio.Shared.VSCodeDebugProtocol;
 using Microsoft.VisualStudio.Shared.VSCodeDebugProtocol.Messages;
+using Newtonsoft.Json.Linq;
+using AppDomainMirror = Mono.Debugger.Soft.AppDomainMirror;
+using AssemblyMirror = Mono.Debugger.Soft.AssemblyMirror;
+using InvokeOptions = Mono.Debugger.Soft.InvokeOptions;
+using MethodMirror = Mono.Debugger.Soft.MethodMirror;
 using MonoStackFrame = Mono.Debugging.Client.StackFrame;
+using PrimitiveValue = Mono.Debugger.Soft.PrimitiveValue;
+using StringMirror = Mono.Debugger.Soft.StringMirror;
+using ThreadMirror = Mono.Debugger.Soft.ThreadMirror;
+using TypeMirror = Mono.Debugger.Soft.TypeMirror;
+using Value = Mono.Debugger.Soft.Value;
+using VirtualMachine = Mono.Debugger.Soft.VirtualMachine;
+using VMNotSuspendedException = Mono.Debugger.Soft.VMNotSuspendedException;
 using DebugProtocol = Microsoft.VisualStudio.Shared.VSCodeDebugProtocol.Messages;
 
 namespace MauiDeploy.Debugger;
@@ -13,9 +27,15 @@ public class MauiDebugSession : DebugAdapterBase
     private readonly SoftDebuggerSession _session = new();
     private readonly Handles<MonoStackFrame> _frameHandles = new();
     private readonly Handles<Func<ObjectValue[]>> _variableHandles = new();
+    private readonly ManualResetEventSlim _targetStoppedSignal = new(false);
+    private readonly object _hotReloadInvokeGate = new();
     private LaunchConfig _config = null!;
     private DeviceLauncher? _launcher;
+    private long? _lastStoppedThreadId;
     private static readonly string LogFile = "/tmp/mauideploy-debug.log";
+    private const string XamlHotReloadRequest = "mauideploy.xamlHotReload";
+    private const string XamlHotReloadStatusRequest = "mauideploy.xamlHotReloadStatus";
+    private const string XamlHotReloadAgentTypeName = "MauiDeploy.HotReload.XamlHotReloadAgent";
 
     private static void Log(string msg)
     {
@@ -26,6 +46,8 @@ public class MauiDebugSession : DebugAdapterBase
     public MauiDebugSession(Stream input, Stream output)
     {
         InitializeProtocolClient(input, output);
+        Protocol.RegisterRequestType<XamlHotReloadProtocolRequest, XamlHotReloadArguments, CustomResponseBody>(HandleXamlHotReloadRequest);
+        Protocol.RegisterRequestType<XamlHotReloadStatusProtocolRequest, XamlHotReloadStatusArguments, CustomResponseBody>(HandleXamlHotReloadStatusRequest);
 
         _session.ExceptionHandler = ex =>
         {
@@ -45,6 +67,7 @@ public class MauiDebugSession : DebugAdapterBase
 
         _session.TargetStopped += (_, e) =>
         {
+            RememberStoppedThread(e.Thread.Id);
             ResetHandles();
             Protocol.SendEvent(new StoppedEvent(StoppedEvent.ReasonValue.Pause)
             {
@@ -55,6 +78,7 @@ public class MauiDebugSession : DebugAdapterBase
         _session.TargetHitBreakpoint += (_, e) =>
         {
             Log($"TargetHitBreakpoint: thread={e.Thread.Id}");
+            RememberStoppedThread(e.Thread.Id);
             ResetHandles();
             Protocol.SendEvent(new StoppedEvent(StoppedEvent.ReasonValue.Breakpoint)
             {
@@ -64,6 +88,7 @@ public class MauiDebugSession : DebugAdapterBase
         };
         _session.TargetExceptionThrown += (_, e) =>
         {
+            RememberStoppedThread(e.Thread.Id);
             ResetHandles();
             Protocol.SendEvent(new StoppedEvent(StoppedEvent.ReasonValue.Exception)
             {
@@ -75,6 +100,7 @@ public class MauiDebugSession : DebugAdapterBase
         };
         _session.TargetUnhandledException += (_, e) =>
         {
+            RememberStoppedThread(e.Thread.Id);
             ResetHandles();
             Protocol.SendEvent(new StoppedEvent(StoppedEvent.ReasonValue.Exception)
             {
@@ -165,7 +191,7 @@ public class MauiDebugSession : DebugAdapterBase
         else if (_config.Platform == "iOS")
         {
             // iOS simulator: app listens, we connect after launch
-            startArgs = new SoftDebuggerConnectArgs(_config.AppName, IPAddress.Loopback, _config.DebugPort);
+            startArgs = CreateRetryingConnectArgs(_config.AppName, _config.DebugPort);
             listensFirst = false;
         }
         else
@@ -215,6 +241,15 @@ public class MauiDebugSession : DebugAdapterBase
         return new LaunchResponse();
     }
 
+    private static SoftDebuggerConnectArgs CreateRetryingConnectArgs(string appName, int debugPort)
+    {
+        return new SoftDebuggerConnectArgs(appName, IPAddress.Loopback, debugPort)
+        {
+            MaxConnectionAttempts = 20,
+            TimeBetweenConnectionAttempts = 500,
+        };
+    }
+
     // ── Configuration Done ─────────────────────────────
 
     protected override ConfigurationDoneResponse HandleConfigurationDoneRequest(
@@ -250,7 +285,7 @@ public class MauiDebugSession : DebugAdapterBase
     protected override ContinueResponse HandleContinueRequest(ContinueArguments arguments)
     {
         if (!_session.IsRunning && !_session.HasExited)
-            _session.Continue();
+            ContinueTarget();
         return new ContinueResponse();
     }
 
@@ -282,6 +317,312 @@ public class MauiDebugSession : DebugAdapterBase
         return new PauseResponse();
     }
 
+    // ── Custom Requests ───────────────────────────────
+
+    private void HandleXamlHotReloadRequest(IRequestResponder<XamlHotReloadArguments, CustomResponseBody> responder)
+    {
+        var resourcePath = responder.Arguments.ResourcePath;
+        var base64Xaml = responder.Arguments.Base64Xaml;
+
+        if (string.IsNullOrWhiteSpace(resourcePath) || string.IsNullOrWhiteSpace(base64Xaml))
+        {
+            responder.SetResponse(new CustomResponseBody("error", "Missing XAML Hot Reload payload."));
+            return;
+        }
+
+        try
+        {
+            var result = ApplyXamlHotReload(resourcePath, base64Xaml);
+            Log($"XAML Hot Reload applied: {result}");
+            OnOutput($"[MauiDeploy] XAML Hot Reload: {result}");
+            responder.SetResponse(new CustomResponseBody("ok", result));
+        }
+        catch (Exception ex)
+        {
+            Log($"XAML Hot Reload failed: {ex}");
+            OnError($"[MauiDeploy] XAML Hot Reload failed: {ex.Message}");
+            responder.SetResponse(new CustomResponseBody("error", ex.Message));
+        }
+    }
+
+    private void HandleXamlHotReloadStatusRequest(IRequestResponder<XamlHotReloadStatusArguments, CustomResponseBody> responder)
+    {
+        var resourcePath = responder.Arguments.ResourcePath;
+
+        if (string.IsNullOrWhiteSpace(resourcePath))
+        {
+            responder.SetResponse(new CustomResponseBody("error", "Missing XAML Hot Reload status path."));
+            return;
+        }
+
+        try
+        {
+            var result = GetXamlHotReloadStatus(resourcePath);
+            Log($"XAML Hot Reload status: {result}");
+            OnOutput($"[MauiDeploy] XAML Hot Reload status: {result}");
+            responder.SetResponse(new CustomResponseBody("ok", result));
+        }
+        catch (Exception ex)
+        {
+            Log($"XAML Hot Reload status failed: {ex}");
+            OnError($"[MauiDeploy] XAML Hot Reload status failed: {ex.Message}");
+            responder.SetResponse(new CustomResponseBody("error", ex.Message));
+        }
+    }
+
+    private string ApplyXamlHotReload(string resourcePath, string base64Xaml)
+    {
+        return InvokeHotReloadAgent("ApplyXaml", resourcePath, base64Xaml);
+    }
+
+    private string GetXamlHotReloadStatus(string resourcePath)
+    {
+        return InvokeHotReloadAgent("GetStatus", resourcePath);
+    }
+
+    private string InvokeHotReloadAgent(string methodName, params string[] arguments)
+    {
+        if (_session.HasExited)
+            throw new ProtocolException("The debug target has exited.");
+
+        var virtualMachine = _session.VirtualMachine
+            ?? throw new ProtocolException("The debug target is not connected.");
+
+        lock (_hotReloadInvokeGate)
+        {
+            Log($"Suspending VM directly for XAML Hot Reload: method={methodName}, sessionRunning={_session.IsRunning}");
+            virtualMachine.Suspend();
+
+            try
+            {
+                return InvokeHotReloadAgentOnStoppedTarget(virtualMachine, methodName, arguments);
+            }
+            finally
+            {
+                if (!_session.HasExited)
+                    ResumeVirtualMachineForHotReload(virtualMachine);
+            }
+        }
+    }
+
+    private string InvokeHotReloadAgentOnStoppedTarget(VirtualMachine virtualMachine, string methodName, string[] arguments)
+    {
+        var agentType = FindHotReloadAgentType(virtualMachine)
+            ?? throw new ProtocolException("The XAML Hot Reload agent is not loaded in the debug target. Rebuild the app with Debug first.");
+        var method = agentType.GetMethodsByNameFlags(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, false)
+            .FirstOrDefault(candidate => candidate.GetParameters().Length == arguments.Length)
+            ?? throw new ProtocolException($"The XAML Hot Reload agent method '{methodName}' was not found.");
+        var thread = GetInvocationThread();
+        var domain = GetAgentDomain(agentType, virtualMachine);
+        var values = arguments.Select(argument => (Value)domain.CreateString(argument)).ToArray();
+
+        Log($"Invoking XAML Hot Reload agent: method={methodName}, thread={SafeThreadName(thread)}, args={arguments.Length}");
+        var result = InvokeAgentMethod(virtualMachine, agentType, thread, method, values);
+
+        return result switch
+        {
+            StringMirror stringMirror => stringMirror.Value,
+            PrimitiveValue primitiveValue => primitiveValue.Value?.ToString() ?? string.Empty,
+            null => string.Empty,
+            _ => result.ToString() ?? string.Empty,
+        };
+    }
+
+    private static Value InvokeAgentMethod(VirtualMachine virtualMachine, TypeMirror agentType, ThreadMirror thread, MethodMirror method, Value[] values)
+    {
+        var invocation = agentType.BeginInvokeMethod(
+            thread,
+            method,
+            values,
+            InvokeOptions.DisableBreakpoints | InvokeOptions.SingleThreaded,
+            null,
+            null);
+
+        if (!invocation.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(5)))
+            throw new ProtocolException("Timed out while invoking the XAML Hot Reload agent.");
+
+        return agentType.EndInvokeMethod(invocation);
+    }
+
+    private static void ResumeVirtualMachineForHotReload(VirtualMachine virtualMachine)
+    {
+        try
+        {
+            virtualMachine.Resume();
+        }
+        catch (VMNotSuspendedException)
+        {
+        }
+    }
+
+    private TypeMirror? FindHotReloadAgentType(VirtualMachine virtualMachine)
+    {
+        var sessionType = _session.GetType(XamlHotReloadAgentTypeName)
+            ?? _session.GetAllTypes().FirstOrDefault(type => type.FullName == XamlHotReloadAgentTypeName);
+        if (sessionType != null)
+        {
+            Log($"Found XAML Hot Reload agent from session cache: {sessionType.FullName}");
+            return sessionType;
+        }
+
+        try
+        {
+            var vmType = virtualMachine.GetTypes(XamlHotReloadAgentTypeName, false).FirstOrDefault();
+            if (vmType != null)
+            {
+                Log($"Found XAML Hot Reload agent from VM type lookup: {vmType.FullName}");
+                return vmType;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"VM type lookup for XAML Hot Reload agent failed: {ex.Message}");
+        }
+
+        foreach (var assembly in GetLoadedAssemblies(virtualMachine))
+        {
+            try
+            {
+                var assemblyType = assembly.GetType(XamlHotReloadAgentTypeName, false, false);
+                if (assemblyType != null)
+                {
+                    Log($"Found XAML Hot Reload agent in assembly {SafeAssemblyName(assembly)}: {assemblyType.FullName}");
+                    return assemblyType;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Assembly type lookup failed in {SafeAssemblyName(assembly)}: {ex.Message}");
+            }
+        }
+
+        Log($"XAML Hot Reload agent not found. Loaded assemblies: {string.Join(", ", GetLoadedAssemblies(virtualMachine).Select(SafeAssemblyName).Take(80))}");
+        return null;
+    }
+
+    private static IEnumerable<AssemblyMirror> GetLoadedAssemblies(VirtualMachine virtualMachine)
+    {
+        try
+        {
+            return virtualMachine.RootDomain?.GetAssemblies() ?? Array.Empty<AssemblyMirror>();
+        }
+        catch
+        {
+            return Array.Empty<AssemblyMirror>();
+        }
+    }
+
+    private ThreadMirror GetInvocationThread()
+    {
+        var threads = _session.VirtualMachine.GetThreads();
+        if (threads.Count == 0)
+            throw new ProtocolException("No target threads are available for XAML Hot Reload invocation.");
+
+        var preferredThread = GetStoppedThreadMirror(threads);
+        if (preferredThread != null && TryGetManagedFrame(preferredThread, out var preferredFrame))
+        {
+            Log($"Selected stopped XAML Hot Reload invoke thread: {SafeThreadName(preferredThread)} @ {preferredFrame.Method.FullName}");
+            return preferredThread;
+        }
+
+        foreach (var thread in threads)
+        {
+            if (TryGetManagedFrame(thread, out var managedFrame))
+            {
+                Log($"Selected XAML Hot Reload invoke thread: {SafeThreadName(thread)} @ {managedFrame.Method.FullName}");
+                return thread;
+            }
+        }
+
+        Log($"Using fallback XAML Hot Reload invoke thread: {SafeThreadName(threads[0])}");
+        return threads[0];
+    }
+
+    private ThreadMirror? GetStoppedThreadMirror(IList<ThreadMirror> threads)
+    {
+        if (!_lastStoppedThreadId.HasValue)
+            return null;
+
+        try
+        {
+            var process = _session.GetProcesses().FirstOrDefault();
+            var threadInfos = process?.GetThreads();
+            if (threadInfos == null)
+                return null;
+
+            var index = Array.FindIndex(threadInfos, thread => thread.Id == _lastStoppedThreadId.Value);
+            if (index >= 0 && index < threads.Count)
+                return threads[index];
+        }
+        catch (Exception ex)
+        {
+            Log($"Could not map stopped thread {_lastStoppedThreadId.Value} to SDB thread mirror: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    private static bool TryGetManagedFrame(ThreadMirror thread, out Mono.Debugger.Soft.StackFrame managedFrame)
+    {
+        managedFrame = null!;
+
+        try
+        {
+            managedFrame = thread.GetFrames().FirstOrDefault(frame => !frame.IsNativeTransition)!;
+            return managedFrame != null;
+        }
+        catch (Exception ex)
+        {
+            Log($"Skipping XAML Hot Reload invoke thread {SafeThreadName(thread)}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static AppDomainMirror GetAgentDomain(TypeMirror agentType, VirtualMachine virtualMachine)
+    {
+        try
+        {
+            return agentType.Assembly.Domain;
+        }
+        catch
+        {
+            return virtualMachine.RootDomain;
+        }
+    }
+
+    private static string SafeThreadName(ThreadMirror thread)
+    {
+        try { return thread.Name; }
+        catch { return "unknown"; }
+    }
+
+    private static string SafeAssemblyName(AssemblyMirror assembly)
+    {
+        try { return assembly.GetName().Name ?? assembly.Location; }
+        catch { return "unknown"; }
+    }
+
+    private string EvaluateOnCurrentFrame(string expression)
+    {
+        var frame = GetEvaluationFrame();
+        if (frame == null)
+            throw new ProtocolException("No stack frame is available for XAML Hot Reload evaluation.");
+
+        var value = frame.GetExpressionValue(expression, _session.EvaluationOptions);
+        value.WaitHandle.WaitOne(_session.EvaluationOptions.EvaluationTimeout);
+
+        if (value.IsEvaluating)
+            throw new ProtocolException("XAML Hot Reload evaluation timed out.");
+        if (value.Flags.HasFlag(ObjectValueFlags.Unknown) ||
+            value.Flags.HasFlag(ObjectValueFlags.NotSupported) ||
+            value.Flags.HasFlag(ObjectValueFlags.ImplicitNotSupported))
+            throw new ProtocolException("XAML Hot Reload evaluation did not run in a managed frame with debug symbols.");
+        if (value.Flags.HasFlag(ObjectValueFlags.Error))
+            throw new ProtocolException(value.DisplayValue ?? "XAML Hot Reload evaluation failed.");
+
+        return value.DisplayValue ?? value.Value;
+    }
+
     // ── Breakpoints ────────────────────────────────────
 
     protected override SetBreakpointsResponse HandleSetBreakpointsRequest(SetBreakpointsArguments arguments)
@@ -293,6 +634,9 @@ public class MauiDebugSession : DebugAdapterBase
             var sourcePath = arguments.Source.Path;
 
             if (string.IsNullOrEmpty(sourcePath))
+                return new SetBreakpointsResponse(breakpoints);
+
+            if (arguments.Breakpoints == null)
                 return new SetBreakpointsResponse(breakpoints);
 
             // Remove existing breakpoints for this file
@@ -552,6 +896,98 @@ public class MauiDebugSession : DebugAdapterBase
     {
         var process = _session.GetProcesses().FirstOrDefault();
         return process?.GetThreads().FirstOrDefault(t => t.Id == threadId);
+    }
+
+    private MonoStackFrame? GetEvaluationFrame()
+    {
+        var process = _session.GetProcesses().FirstOrDefault();
+        if (process == null)
+            return null;
+
+        var threads = process.GetThreads();
+        var preferredThread = _lastStoppedThreadId.HasValue
+            ? threads.FirstOrDefault(thread => thread.Id == _lastStoppedThreadId.Value)
+            : null;
+
+        foreach (var thread in preferredThread == null ? threads : new[] { preferredThread }.Concat(threads))
+        {
+            try
+            {
+                var backtrace = thread.Backtrace;
+                if (backtrace != null && backtrace.FrameCount > 0)
+                    return backtrace.GetFrame(0);
+            }
+            catch { }
+        }
+
+        return null;
+    }
+
+    private void RememberStoppedThread(long threadId)
+    {
+        _lastStoppedThreadId = threadId;
+        _targetStoppedSignal.Set();
+    }
+
+    private void ContinueTarget()
+    {
+        _session.Continue();
+        Protocol.SendEvent(new ContinuedEvent((int)(_lastStoppedThreadId ?? 0))
+        {
+            AllThreadsContinued = true,
+        });
+    }
+
+    private sealed class XamlHotReloadProtocolRequest : DebugRequestWithResponse<XamlHotReloadArguments, CustomResponseBody>
+    {
+        public const string RequestType = XamlHotReloadRequest;
+
+        public XamlHotReloadProtocolRequest()
+            : base(RequestType)
+        {
+        }
+    }
+
+    private sealed class XamlHotReloadStatusProtocolRequest : DebugRequestWithResponse<XamlHotReloadStatusArguments, CustomResponseBody>
+    {
+        public const string RequestType = XamlHotReloadStatusRequest;
+
+        public XamlHotReloadStatusProtocolRequest()
+            : base(RequestType)
+        {
+        }
+    }
+
+    private sealed class XamlHotReloadArguments : DebugRequestArguments
+    {
+        public string? ResourcePath { get; set; }
+        public string? Base64Xaml { get; set; }
+    }
+
+    private sealed class XamlHotReloadStatusArguments : DebugRequestArguments
+    {
+        public string? ResourcePath { get; set; }
+    }
+
+    private static string ToCSharpString(string value)
+    {
+        return "\"" + value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal)
+            .Replace("\r", "\\r", StringComparison.Ordinal)
+            .Replace("\n", "\\n", StringComparison.Ordinal) + "\"";
+    }
+
+    private sealed class CustomResponseBody : ResponseBody
+    {
+        public CustomResponseBody(string status, string? details)
+        {
+            AdditionalProperties = new Dictionary<string, JToken>
+            {
+                ["status"] = JToken.FromObject(status),
+                ["details"] = JToken.FromObject(details ?? string.Empty),
+            };
+        }
     }
 
     private void ResetHandles()

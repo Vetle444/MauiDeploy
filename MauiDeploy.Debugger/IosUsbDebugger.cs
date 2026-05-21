@@ -113,7 +113,16 @@ public class IosUsbConnectionProvider : ISoftDebuggerConnectionProvider
 
     public bool ShouldRetryConnection(Exception ex)
     {
+        ex = UnwrapConnectionException(ex);
         return ex is SocketException or IOException or TimeoutException;
+    }
+
+    private static Exception UnwrapConnectionException(Exception ex)
+    {
+        while (ex is AggregateException { InnerExceptions.Count: 1 } aggregateException)
+            ex = aggregateException.InnerExceptions[0];
+
+        return ex;
     }
 
     private static void SendCommand(Socket socket, string command)

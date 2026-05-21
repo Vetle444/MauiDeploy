@@ -14,6 +14,11 @@ export async function findWorkspaceMauiProjects(): Promise<string[]> {
     return results;
 }
 
+export async function findWorkspaceCsprojs(): Promise<string[]> {
+    const csprojFiles = await vscode.workspace.findFiles('**/*.csproj', '**/{bin,obj,node_modules}/**', 200);
+    return csprojFiles.map(uri => uri.fsPath).sort((left, right) => left.localeCompare(right));
+}
+
 export function findCsprojsInDir(dir: string, depth = 0): string[] {
     const results: string[] = [];
     if (depth > 5) { return results; }

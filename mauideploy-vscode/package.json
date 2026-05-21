@@ -1,8 +1,8 @@
 {
   "name": "mauideploy",
   "displayName": "MAUI Deploy",
-  "description": "Rider-like toolbar for building & deploying .NET MAUI apps",
-  "version": "0.2.0",
+  "description": "Rider-like toolbar for building, deploying, and debugging .NET MAUI apps",
+  "version": "0.3.0",
   "publisher": "DIPS",
   "license": "MIT",
   "repository": {
@@ -67,9 +67,29 @@
         "icon": "$(play)"
       },
       {
+        "command": "mauideploy.deployFromBin",
+        "title": "MAUI Deploy: Deploy from Bin",
+        "icon": "$(rocket)"
+      },
+      {
         "command": "mauideploy.debug",
         "title": "MAUI Deploy: Debug",
         "icon": "$(bug)"
+      },
+      {
+        "command": "mauideploy.hotReload",
+        "title": "MAUI Deploy: Watch Run (Experimental)",
+        "icon": "$(flame)"
+      },
+      {
+        "command": "mauideploy.stopHotReload",
+        "title": "MAUI Deploy: Stop Watch Run",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mauideploy.runTests",
+        "title": "MAUI Deploy: Run Tests",
+        "icon": "$(beaker)"
       },
       {
         "command": "mauideploy.pickProject",
@@ -90,6 +110,11 @@
         "command": "mauideploy.openLogs",
         "title": "MAUI Deploy: Open Logs",
         "icon": "$(output)"
+      },
+      {
+        "command": "mauideploy.fixBuildErrorWithCopilot",
+        "title": "MAUI Deploy: Ask Copilot to Fix Build Error",
+        "icon": "$(sparkle)"
       }
     ],
     "keybindings": [

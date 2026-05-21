@@ -226,6 +226,21 @@ export function findAndroidApk(csprojPath: string, framework: string, config: st
     return undefined;
 }
 
+export function getAndroidPackageId(csprojPath: string): string | undefined {
+    try {
+        const content = fs.readFileSync(csprojPath, 'utf-8');
+        const applicationId = readMsBuildProperty(content, 'ApplicationId')
+            ?? readMsBuildProperty(content, 'AndroidPackageName');
+        return applicationId?.trim() || undefined;
+    } catch { return undefined; }
+}
+
+function readMsBuildProperty(content: string, propertyName: string): string | undefined {
+    const escapedName = propertyName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const match = content.match(new RegExp(`<${escapedName}(?:\\s[^>]*)?>(.*?)</${escapedName}>`, 's'));
+    return match?.[1];
+}
+
 export async function getBundleId(appPath: string): Promise<string | undefined> {
     const plistPath = path.join(appPath, 'Info.plist');
     if (!fs.existsSync(plistPath)) { return undefined; }

@@ -4,7 +4,7 @@ MauiDeploy is a self-contained .NET MAUI deployment toolkit with three pieces:
 
 - `MauiDeploy/` - console deploy tool built with Spectre.Console
 - `MauiDeploy.Debugger/` - Mono SDB to VS Code Debug Adapter Protocol bridge
-- `mauideploy-vscode/` - VS Code extension for selecting projects, choosing devices, running, and debugging MAUI apps
+- `mauideploy-vscode/` - VS Code extension for selecting projects, choosing devices, building, deploying existing builds, running tests, and debugging MAUI apps
 
 The VS Code extension does not depend on C# Dev Kit or DotNet.Meteor. The debugger is published into the extension package and launched with `dotnet`.
 
