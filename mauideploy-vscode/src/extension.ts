@@ -18,6 +18,8 @@ import {
 
 const execFileAsync = promisify(execFile);
 const xamlHotReloadPort = 55337;
+const xamlHotReloadRequestAttempts = 4;
+const xamlHotReloadRequestRetryDelayMs = 700;
 
 // ── State ──────────────────────────────────────────────
 
@@ -350,6 +352,10 @@ function registerDebugHotReload(context: vscode.ExtensionContext) {
     );
 }
 
+function debugLog(message: string) {
+    vscode.debug.activeDebugConsole?.appendLine(`[MauiDeploy] ${message}`);
+}
+
 function startXamlHotReloadWatcher(session: vscode.DebugSession) {
     const projectPath = session.configuration.projectPath;
     if (typeof projectPath !== 'string' || !fs.existsSync(projectPath)) {
@@ -396,7 +402,7 @@ function queueXamlHotReload(session: vscode.DebugSession, projectPath: string, f
     const timer = setTimeout(() => {
         xamlHotReloadTimers.delete(filePath);
         void applyXamlHotReload(session, projectPath, filePath);
-    }, 250);
+    }, 100);
     xamlHotReloadTimers.set(filePath, timer);
 }
 
@@ -435,61 +441,53 @@ async function sendXamlHotReload(session: vscode.DebugSession, projectPath: stri
     }
 
     const base64Xaml = Buffer.from(xaml, 'utf8').toString('base64');
+    const fileName = path.basename(filePath);
+    debugLog(`Hot Reload: sending ${fileName} (${resourcePath}, ${xaml.length} chars)`);
 
     try {
-        const response = await postXamlHotReload('/apply', {
+        const response = await postXamlHotReloadWithRetry('/apply', {
             resourcePath,
             base64Xaml
         });
 
         if (response?.status === 'error') {
+            debugLog(`Hot Reload: error — ${response.details || 'unknown'}`);
             vscode.window.showErrorMessage(`MAUI XAML Hot Reload failed: ${response.details || 'unknown error'}`);
             return;
         }
 
         lastAppliedXamlByFile.set(filePath, xaml);
-        vscode.window.setStatusBarMessage(`MAUI XAML Hot Reload queued ${path.basename(filePath)}`, 2000);
-        setTimeout(() => {
-            void checkXamlHotReloadStatus(session, filePath, resourcePath);
-        }, 1000);
+        debugLog(`Hot Reload: response — ${response.details ?? ''}`);
+        showXamlHotReloadResult(filePath, resourcePath, response.details ?? '');
     } catch (error) {
-        vscode.window.showErrorMessage(`MAUI XAML Hot Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        debugLog(`Hot Reload: failed — ${message}`);
+        vscode.window.showErrorMessage(`MAUI XAML Hot Reload failed: ${message}`);
     }
 }
 
-async function checkXamlHotReloadStatus(session: vscode.DebugSession, filePath: string, resourcePath: string) {
-    if (session !== xamlHotReloadSession) {
+function showXamlHotReloadResult(filePath: string, resourcePath: string, details: string) {
+    const matchedViews = readMetric(details, 'matchedViews');
+    const explicitReloads = readMetric(details, 'explicitReloads');
+    const inPlaceReloads = readMetric(details, 'inPlaceReloads');
+    const freshReloads = readMetric(details, 'freshReloads');
+    const cachedResource = readMetric(details, 'cachedResource');
+
+    if (cachedResource === 1 && matchedViews === 0) {
+        debugLog(`Hot Reload: ${path.basename(filePath)} cached for next navigation`);
+        vscode.window.setStatusBarMessage(`MAUI XAML Hot Reload cached ${path.basename(filePath)} for next navigation`, 3000);
         return;
     }
 
-    try {
-        const response = await postXamlHotReload('/status', { resourcePath });
-        const details = typeof response?.details === 'string' ? response.details : '';
-
-        if (response?.status === 'error') {
-            vscode.window.showErrorMessage(`MAUI XAML Hot Reload status failed: ${details || 'unknown error'}`);
-            return;
-        }
-
-        const providerHits = readMetric(details, 'providerHits');
-        const matchedViews = readMetric(details, 'matchedViews');
-        const explicitReloads = readMetric(details, 'explicitReloads');
-        const cachedResource = readMetric(details, 'cachedResource');
-
-        if (cachedResource === 1 && matchedViews === 0) {
-            vscode.window.setStatusBarMessage(`MAUI XAML Hot Reload cached ${path.basename(filePath)} for next navigation`, 3000);
-            return;
-        }
-
-        if (providerHits === 0 || matchedViews === 0 || explicitReloads === 0) {
-            vscode.window.showWarningMessage(`MAUI XAML Hot Reload did not update ${path.basename(filePath)}. ${details}`);
-            return;
-        }
-
-        vscode.window.setStatusBarMessage(`MAUI XAML Hot Reload applied ${path.basename(filePath)}`, 2000);
-    } catch (error) {
-        vscode.window.showErrorMessage(`MAUI XAML Hot Reload status failed: ${error instanceof Error ? error.message : String(error)}`);
+    if (matchedViews === 0 || explicitReloads === 0) {
+        debugLog(`Hot Reload: no views updated for ${path.basename(filePath)}`);
+        vscode.window.showWarningMessage(`MAUI XAML Hot Reload did not update ${path.basename(filePath)}. ${details}`);
+        return;
     }
+
+    const mode = inPlaceReloads && inPlaceReloads > 0 ? 'applied in-place' : 'applied';
+    debugLog(`Hot Reload: ${mode} ${path.basename(filePath)} (matched: ${matchedViews}, in-place: ${inPlaceReloads}, fresh: ${freshReloads})`);
+    vscode.window.setStatusBarMessage(`MAUI XAML Hot Reload ${mode} ${path.basename(filePath)}`, 2000);
 }
 
 function startXamlHotReloadTunnel(session: vscode.DebugSession) {
@@ -535,6 +533,38 @@ function stopXamlHotReloadTunnel() {
 async function postXamlHotReload(endpoint: '/apply' | '/status', body: Record<string, string>): Promise<{ status: string; details: string }> {
     const details = await postText(endpoint, JSON.stringify(body));
     return { status: 'ok', details };
+}
+
+async function postXamlHotReloadWithRetry(endpoint: '/apply' | '/status', body: Record<string, string>): Promise<{ status: string; details: string }> {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= xamlHotReloadRequestAttempts; attempt++) {
+        try {
+            return await postXamlHotReload(endpoint, body);
+        } catch (error) {
+            lastError = error;
+            if (!isTransientXamlHotReloadConnectionError(error) || attempt === xamlHotReloadRequestAttempts) {
+                throw error;
+            }
+
+            await delay(xamlHotReloadRequestRetryDelayMs);
+        }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function isTransientXamlHotReloadConnectionError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes('Timed out connecting to the MAUI XAML Hot Reload agent.')
+        || message.includes('ECONNREFUSED')
+        || message.includes('ECONNRESET')
+        || message.includes('ETIMEDOUT')
+        || message.includes('socket hang up');
+}
+
+function delay(milliseconds: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
 function postText(endpoint: string, body: string): Promise<string> {

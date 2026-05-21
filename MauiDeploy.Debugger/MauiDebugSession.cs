@@ -234,6 +234,7 @@ public class MauiDebugSession : DebugAdapterBase
             catch (Exception ex)
             {
                 OnError($"[MauiDeploy] Launch failed: {ex.Message}");
+                _launcher?.Dispose();
                 Protocol.SendEvent(new TerminatedEvent());
             }
         });

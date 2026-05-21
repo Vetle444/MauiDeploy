@@ -4,6 +4,9 @@ namespace MauiDeploy.Debugger;
 
 public class DeviceLauncher : IDisposable
 {
+    private const int IosUsbDeviceWaitTimeoutMilliseconds = 120000;
+    private const int IosUsbDeviceRetryDelayMilliseconds = 1000;
+
     private readonly LaunchConfig _config;
     private readonly List<Process> _processes = new();
 
@@ -63,34 +66,37 @@ public class DeviceLauncher : IDisposable
 
     private void LaunchIosDevice(Action<string> onOutput, Action<string> onError)
     {
-        // Install via devicectl
-        onOutput("Installing on physical device...");
-        RunAndWait("xcrun", $"devicectl device install app --device {_config.DeviceId} \"{_config.ProgramPath}\"",
-            onOutput, onError);
-
         var bundleId = GetBundleId(_config.ProgramPath);
         if (string.IsNullOrEmpty(bundleId))
             throw new InvalidOperationException("Could not determine bundle ID from app bundle");
 
         onOutput($"Bundle ID: {bundleId}");
 
-        // Start iproxy FIRST — the tunnel must be ready before the app launches.
+        WaitForIosUsbDevice(onOutput);
+
+        // Start iproxy first — the tunnel must be ready before the app launches.
         // The app only waits ~2 seconds for a debugger connection after start.
-        // iproxy just listens locally and forwards through usbmuxd on demand.
-        onOutput($"Setting up USB tunnel: localhost:{_config.DebugPort} → device:10000");
+        // iproxy uses usbmuxd, so it proves the physical USB debug path is available.
+        onOutput($"Setting up USB tunnel: localhost:{_config.DebugPort} -> device:10000");
         var iproxyProcess = StartProcess("iproxy",
             $"{_config.DebugPort}:10000 -u {_config.DeviceId}",
             onOutput, onError);
         _processes.Add(iproxyProcess);
+        EnsureIproxyStarted(iproxyProcess);
 
-        // Give iproxy a moment to start listening
-        Thread.Sleep(500);
+        // Install via devicectl after the USB-only tunnel has been verified.
+        // devicectl may see paired devices over Wi-Fi, but the debugger needs USB.
+        onOutput("Installing on physical device...");
+        RunAndWait("xcrun", $"devicectl device install app --device {_config.DeviceId} \"{_config.ProgramPath}\"",
+            onOutput, onError);
+        EnsureIproxyStillRunning(iproxyProcess, "after installing the app");
 
         // Launch app via devicectl
         onOutput("Launching app on device...");
         var launchArgs = $"devicectl device process launch --device {_config.DeviceId} -- {bundleId}";
         onOutput($"xcrun {launchArgs}");
         RunAndWait("xcrun", launchArgs, onOutput, onError);
+        EnsureIproxyStillRunning(iproxyProcess, "after launching the app");
 
         // Brief wait for the app's debug listener to start (it listens on port 10000)
         onOutput("Waiting for app debug listener...");
@@ -275,6 +281,83 @@ public class DeviceLauncher : IDisposable
         process.BeginErrorReadLine();
 
         return process;
+    }
+
+    private void WaitForIosUsbDevice(Action<string> onOutput)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var nextStatus = TimeSpan.Zero;
+
+        while (stopwatch.ElapsedMilliseconds < IosUsbDeviceWaitTimeoutMilliseconds)
+        {
+            if (IsIosUsbDeviceConnected(_config.DeviceId))
+            {
+                if (stopwatch.ElapsedMilliseconds >= IosUsbDeviceRetryDelayMilliseconds)
+                    onOutput("USB device connected.");
+                return;
+            }
+
+            if (stopwatch.Elapsed >= nextStatus)
+            {
+                var remainingSeconds = Math.Max(0,
+                    (IosUsbDeviceWaitTimeoutMilliseconds - stopwatch.ElapsedMilliseconds) / 1000);
+                onOutput(
+                    $"Waiting for USB connection to {_config.DeviceName}. " +
+                    $"Connect the cable, unlock the device, and tap Trust if prompted. ({remainingSeconds}s remaining)");
+                nextStatus = stopwatch.Elapsed + TimeSpan.FromSeconds(5);
+            }
+
+            Thread.Sleep(IosUsbDeviceRetryDelayMilliseconds);
+        }
+
+        throw new InvalidOperationException(
+            $"Timed out waiting for {_config.DeviceName} to appear over USB. " +
+            "Physical iOS debugging requires a USB cable and a trusted device; Wi-Fi pairing is not enough for the Mono debugger tunnel.");
+    }
+
+    private static bool IsIosUsbDeviceConnected(string deviceId)
+    {
+        var psi = new ProcessStartInfo("idevice_id", "-l")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start idevice_id. Install libimobiledevice to debug physical iOS devices over USB.");
+
+        var stdout = process.StandardOutput.ReadToEnd();
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException($"idevice_id exited with code {process.ExitCode}: {stderr}");
+
+        return stdout
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Any(id => string.Equals(id.Trim(), deviceId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void EnsureIproxyStarted(Process iproxyProcess)
+    {
+        if (iproxyProcess.WaitForExit(1500))
+            ThrowIproxyUnavailable(iproxyProcess, "exited during startup");
+    }
+
+    private static void EnsureIproxyStillRunning(Process iproxyProcess, string phase)
+    {
+        if (iproxyProcess.HasExited)
+            ThrowIproxyUnavailable(iproxyProcess, $"exited {phase}");
+    }
+
+    private static void ThrowIproxyUnavailable(Process iproxyProcess, string reason)
+    {
+        var exitCode = iproxyProcess.HasExited ? iproxyProcess.ExitCode.ToString() : "unknown";
+        throw new InvalidOperationException(
+            $"Could not start the iOS USB debug tunnel: iproxy {reason} (exit code {exitCode}). " +
+            "Physical iOS debugging requires the device to be connected with a USB cable and trusted on this Mac. " +
+            "devicectl can sometimes see paired devices over Wi-Fi, but the Mono debugger attaches through USB.");
     }
 
     public void Dispose()

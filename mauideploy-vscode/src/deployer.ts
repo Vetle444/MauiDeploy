@@ -524,6 +524,28 @@ internal static class XamlHotReloadAgent
     private static readonly ConcurrentDictionary<string, string> Resources = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<Type, BindableProperty[]> BindablePropertiesByType = new();
     private static readonly ConcurrentDictionary<Type, FieldInfo[]> GeneratedFieldsByType = new();
+    private static readonly ConcurrentDictionary<Type, string> XamlFilePathByType = new();
+    private static readonly ConcurrentDictionary<Type, BindableProperty[]> DataTemplatePropertiesByType = new();
+    private static readonly MethodInfo GetIsBoundMethod = typeof(BindableObject).GetMethod("GetIsBound", BindingFlags.NonPublic | BindingFlags.Instance);
+    private static readonly PropertyInfo IsReadOnlyPropertyInfo = typeof(BindableProperty).GetProperty("IsReadOnly", BindingFlags.NonPublic | BindingFlags.Instance);
+    private static readonly HashSet<string> StructuralPropertyNames = new(StringComparer.Ordinal)
+    {
+        "Children",
+        "Content",
+        "ControlTemplate",
+        "Footer",
+        "FooterTemplate",
+        "Header",
+        "HeaderTemplate",
+        "ItemsSource",
+        "ItemTemplate",
+        "ItemTemplateSelector",
+        "LogicalChildren",
+        "MenuItems",
+        "Resources",
+        "RowDefinitions",
+        "ColumnDefinitions"
+    };
     private static int providerInstalled;
     private static int serverStarted;
     private static int applyVersion;
@@ -533,6 +555,8 @@ internal static class XamlHotReloadAgent
     private static int lastMatchedViews;
     private static int lastReloadHandlers;
     private static int lastReloadedViews;
+    private static int lastInPlaceReloadedViews;
+    private static int lastFreshReloadedViews;
     private static string lastAppliedPath = string.Empty;
     private static string lastRequestedPath = string.Empty;
     private static string lastMatchedPath = string.Empty;
@@ -561,6 +585,15 @@ internal static class XamlHotReloadAgent
         var xaml = NormalizeXaml(Encoding.UTF8.GetString(Convert.FromBase64String(base64Xaml)));
         var version = Interlocked.Increment(ref applyVersion);
 
+        // Skip reload if XAML is identical to what we already cached
+        if (Resources.TryGetValue(normalizedPath, out var existing) && existing == xaml)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload v{version}: skipped (identical to previous)");
+            return $"Skipped XAML Hot Reload v{version} for {normalizedPath} (unchanged). {GetStatus(normalizedPath)}";
+        }
+
+        Debug.WriteLine($"[MauiDeploy] Hot Reload v{version}: received {normalizedPath} ({xaml.Length} chars)");
+
         Resources[normalizedPath] = xaml;
         Resources[normalizedPath.Replace('/', '.')] = xaml;
 
@@ -577,14 +610,16 @@ internal static class XamlHotReloadAgent
         MauiHotReloadHelper.IsEnabled = true;
         ReloadOnMainThread(normalizedPath);
 
-        return $"Queued XAML Hot Reload v{version} for {normalizedPath}. {GetStatus(normalizedPath)}";
+        var status = GetStatus(normalizedPath);
+        Debug.WriteLine($"[MauiDeploy] Hot Reload v{version}: done. {status}");
+        return $"Queued XAML Hot Reload v{version} for {normalizedPath}. {status}";
     }
 
     public static string GetStatus(string resourcePath)
     {
         var normalizedPath = NormalizeResourcePath(resourcePath ?? string.Empty);
         var cachedResource = TryGetResource(normalizedPath, out _, out _) ? 1 : 0;
-        return $"serverStarted={Volatile.Read(ref serverStarted)}, serverPort={ServerPort}, serverError='{lastServerError}', activeViews={Volatile.Read(ref lastActiveViews)}, matchedViews={Volatile.Read(ref lastMatchedViews)}, reloadHandlers={Volatile.Read(ref lastReloadHandlers)}, explicitReloads={Volatile.Read(ref lastReloadedViews)}, providerRequests={Volatile.Read(ref providerRequests)}, providerHits={Volatile.Read(ref providerHits)}, cachedResource={cachedResource}, reloadError='{lastReloadError}', lastApplied='{lastAppliedPath}', lastRequested='{lastRequestedPath}', lastMatched='{lastMatchedPath}', requested='{normalizedPath}'";
+        return $"serverStarted={Volatile.Read(ref serverStarted)}, serverPort={ServerPort}, serverError='{lastServerError}', activeViews={Volatile.Read(ref lastActiveViews)}, matchedViews={Volatile.Read(ref lastMatchedViews)}, reloadHandlers={Volatile.Read(ref lastReloadHandlers)}, explicitReloads={Volatile.Read(ref lastReloadedViews)}, inPlaceReloads={Volatile.Read(ref lastInPlaceReloadedViews)}, freshReloads={Volatile.Read(ref lastFreshReloadedViews)}, providerRequests={Volatile.Read(ref providerRequests)}, providerHits={Volatile.Read(ref providerHits)}, cachedResource={cachedResource}, reloadError='{lastReloadError}', lastApplied='{lastAppliedPath}', lastRequested='{lastRequestedPath}', lastMatched='{lastMatchedPath}', requested='{normalizedPath}'";
     }
 
     private static void StartServer()
@@ -807,6 +842,7 @@ internal static class XamlHotReloadAgent
 
         Interlocked.Increment(ref providerHits);
         lastMatchedPath = resourcePath;
+        Debug.WriteLine($"[MauiDeploy] ResourceProvider: serving cached XAML for {resourcePath}");
 
         return new ResourceLoader.ResourceLoadingResponse
         {
@@ -817,15 +853,18 @@ internal static class XamlHotReloadAgent
 
     private static int ReloadMatchingViews(string resourcePath)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         var activeViews = 0;
         var matchedViews = 0;
         var reloadHandlers = 0;
         var reloadedViews = 0;
+        var inPlaceReloadedViews = 0;
+        var freshReloadedViews = 0;
         lastReloadError = string.Empty;
 
         try
         {
-            foreach (var item in GetActiveViews())
+            foreach (var item in GetReloadCandidates(GetActiveViews()))
             {
                 if (item == null)
                     continue;
@@ -839,28 +878,123 @@ internal static class XamlHotReloadAgent
                     continue;
 
                 matchedViews++;
+                var scanMs = sw.ElapsedMilliseconds;
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: matched {viewType.Name} (#{matchedViews}) after scanning {activeViews} views in {scanMs}ms");
 
                 try
                 {
-                    if (TryReloadFromFreshInstance(item, viewType))
+                    var reloadSw = System.Diagnostics.Stopwatch.StartNew();
+                    if (TryReloadViaInitializeComponent(item, viewType))
+                    {
                         reloadedViews++;
+                        inPlaceReloadedViews++;
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} via InitializeComponent in {reloadSw.ElapsedMilliseconds}ms");
+                    }
+                    else
+                    {
+                        // Create replacement once for both in-place and fresh strategies
+                        var replacement = CreateReplacement(viewType, item, out var bindingContext);
+                        var createMs = reloadSw.ElapsedMilliseconds;
+                        if (replacement != null && TryReloadInPlace(item, replacement, bindingContext))
+                        {
+                            reloadedViews++;
+                            inPlaceReloadedViews++;
+                            Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} in-place in {reloadSw.ElapsedMilliseconds}ms (create: {createMs}ms)");
+                        }
+                        else if (replacement != null && TryReloadFromReplacement(item, replacement, bindingContext, viewType))
+                        {
+                            reloadedViews++;
+                            freshReloadedViews++;
+                            Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} via fresh instance in {reloadSw.ElapsedMilliseconds}ms (create: {createMs}ms)");
+                        }
+                        else
+                        {
+                            Debug.WriteLine($"[MauiDeploy] Hot Reload: could not reload {viewType.Name} (neither in-place nor fresh succeeded)");
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
                     lastReloadError = FormatException(UnwrapException(ex));
-                    Debug.WriteLine($"[MauiDeploy] XAML Hot Reload view reload failed: {ex}");
+                    Debug.WriteLine($"[MauiDeploy] Hot Reload: reload failed for {viewType.Name}: {ex}");
                 }
             }
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[MauiDeploy] XAML Hot Reload active view scan failed: {ex}");
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: active view scan failed: {ex}");
+        }
+
+        Debug.WriteLine($"[MauiDeploy] Hot Reload: scanned {activeViews} views, matched {matchedViews}, reloaded {reloadedViews} (in-place: {inPlaceReloadedViews}, fresh: {freshReloadedViews}) in {sw.ElapsedMilliseconds}ms total");
+
+        if (matchedViews == 0)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: no direct matches, scanning DataTemplate consumers for {resourcePath}...");
+            try
+            {
+                foreach (var item in GetReloadCandidates(GetActiveViews()))
+                {
+                    if (item is not BindableObject bindable)
+                        continue;
+
+                    var templateProps = GetDataTemplateProperties(bindable.GetType());
+                    if (templateProps.Length == 0)
+                        continue;
+
+                    var refreshed = false;
+                    foreach (var prop in templateProps)
+                    {
+                        if (!bindable.IsSet(prop))
+                            continue;
+
+                        try
+                        {
+                            var value = bindable.GetValue(prop);
+                            if (value == null)
+                                continue;
+
+                            if (!DataTemplateContainsMatchingView(value, resourcePath))
+                            {
+                                Debug.WriteLine($"[MauiDeploy] Hot Reload: skipping {bindable.GetType().Name}.{prop.PropertyName} (template does not contain {Path.GetFileName(resourcePath)})");
+                                continue;
+                            }
+
+                            Debug.WriteLine($"[MauiDeploy] Hot Reload: resetting {bindable.GetType().Name}.{prop.PropertyName} (contains matching view)");
+                            bindable.ClearValue(prop);
+                            bindable.SetValue(prop, value);
+                            refreshed = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[MauiDeploy] Hot Reload: template refresh failed for {bindable.GetType().Name}.{prop.PropertyName}: {ex.Message}");
+                        }
+                    }
+
+                    if (refreshed)
+                    {
+                        matchedViews++;
+                        reloadedViews++;
+                        freshReloadedViews++;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: template scan failed: {ex}");
+            }
+
+            if (matchedViews > 0)
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: refreshed {matchedViews} template consumer(s)");
+            else
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: no template consumers found, XAML cached for next navigation");
         }
 
         Volatile.Write(ref lastActiveViews, activeViews);
         Volatile.Write(ref lastMatchedViews, matchedViews);
         Volatile.Write(ref lastReloadHandlers, reloadHandlers);
         Volatile.Write(ref lastReloadedViews, reloadedViews);
+        Volatile.Write(ref lastInPlaceReloadedViews, inPlaceReloadedViews);
+        Volatile.Write(ref lastFreshReloadedViews, freshReloadedViews);
         return reloadedViews;
     }
 
@@ -880,44 +1014,137 @@ internal static class XamlHotReloadAgent
 
     private static string GetXamlFilePath(Type viewType)
     {
-        foreach (var attribute in viewType.GetCustomAttributes(inherit: true))
+        return XamlFilePathByType.GetOrAdd(viewType, static type =>
         {
-            var attributeType = attribute.GetType();
-            if (attributeType.FullName != "Microsoft.Maui.Controls.Xaml.XamlFilePathAttribute")
-                continue;
+            foreach (var attribute in type.GetCustomAttributes(inherit: true))
+            {
+                var attributeType = attribute.GetType();
+                if (attributeType.FullName != "Microsoft.Maui.Controls.Xaml.XamlFilePathAttribute")
+                    continue;
 
-            if (attributeType.GetProperty("FilePath")?.GetValue(attribute) is string path)
-                return path;
+                if (attributeType.GetProperty("FilePath")?.GetValue(attribute) is string path)
+                    return path;
 
-            if (attributeType.GetProperty("Path")?.GetValue(attribute) is string fallbackPath)
-                return fallbackPath;
-        }
+                if (attributeType.GetProperty("Path")?.GetValue(attribute) is string fallbackPath)
+                    return fallbackPath;
+            }
 
-        return string.Empty;
+            return string.Empty;
+        });
     }
 
-    private static bool TryReloadFromFreshInstance(object target, Type viewType)
+    private static bool TryReloadInPlace(object target, object replacement, object bindingContext)
     {
-        object replacement;
+        if (GetIsBoundMethod == null)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: in-place skipped — GetIsBound method not found");
+            return false;
+        }
+
+        if (target is not BindableObject targetRoot || replacement is not BindableObject replacementRoot)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: in-place skipped — target or replacement is not BindableObject");
+            return false;
+        }
+
+        if (!TryCollectStructuralTree(targetRoot, out var targetTree) || !TryCollectStructuralTree(replacementRoot, out var replacementTree))
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: in-place skipped — structural tree collection failed");
+            return false;
+        }
+
+        if (!HaveSameStructure(targetTree, replacementTree))
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: in-place skipped — structure differs (target: {targetTree.Count} nodes, replacement: {replacementTree.Count} nodes)");
+            if (targetTree.Count == replacementTree.Count)
+            {
+                for (var d = 0; d < targetTree.Count; d++)
+                {
+                    if (targetTree[d].GetType() != replacementTree[d].GetType())
+                    {
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload:   node {d}: {targetTree[d].GetType().Name} vs {replacementTree[d].GetType().Name}");
+                        break;
+                    }
+                }
+            }
+            return false;
+        }
+
+        var changedValues = 0;
+        for (var i = 0; i < targetTree.Count; i++)
+        {
+            var copiedValues = CopyInPlaceBindableValues(replacementTree[i], targetTree[i]);
+            if (copiedValues < 0)
+            {
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: in-place skipped — CopyInPlaceBindableValues failed at node {i} ({targetTree[i].GetType().Name})");
+                return false;
+            }
+
+            changedValues += copiedValues;
+        }
+
+        if (changedValues == 0)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: in-place skipped — no values changed across {targetTree.Count} nodes");
+            return false;
+        }
+
+        targetRoot.BindingContext = bindingContext;
+        return true;
+    }
+
+    private static bool TryReloadViaInitializeComponent(object target, Type viewType)
+    {
+        var initMethod = viewType.GetMethod("InitializeComponent", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+        if (initMethod == null)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: InitializeComponent not found on {viewType.Name}");
+            return false;
+        }
+
+        var bindingContext = (target as BindableObject)?.BindingContext;
+
+        // Save content so we can restore on failure (preserves fallback strategies)
+        View savedContent = null;
+        if (target is ContentPage savePage)
+            savedContent = savePage.Content;
+        else if (target is ContentView saveCv)
+            savedContent = saveCv.Content;
+
+        // Clear NameScope so XAML loader can re-register x:Name elements
+        if (target is BindableObject bo)
+            NameScope.SetNameScope(bo, new NameScope());
+
+        // Clear existing content to avoid "already a child" warnings
+        if (target is ContentPage page)
+            page.Content = null;
+        else if (target is ContentView cv)
+            cv.Content = null;
+
         try
         {
-            replacement = Activator.CreateInstance(viewType);
+            initMethod.Invoke(target, null);
         }
-        catch (MissingMethodException)
+        catch (Exception ex)
         {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: InitializeComponent failed: {UnwrapException(ex).Message}");
+            // Restore content so fallback strategies work on intact page
+            if (target is ContentPage rp)
+                rp.Content = savedContent;
+            else if (target is ContentView rc)
+                rc.Content = savedContent;
             return false;
         }
 
-        if (replacement == null)
-            return false;
+        // Restore BindingContext if InitializeComponent cleared it
+        if (target is BindableObject boAfter && boAfter.BindingContext == null && bindingContext != null)
+            boAfter.BindingContext = bindingContext;
 
-        var bindingContext = target is BindableObject targetBindable
-            ? targetBindable.BindingContext
-            : null;
+        return true;
+    }
 
-        if (replacement is BindableObject replacementBindable)
-            replacementBindable.BindingContext = bindingContext;
-
+    private static bool TryReloadFromReplacement(object target, object replacement, object bindingContext, Type viewType)
+    {
         if (target is BindableObject targetRoot && replacement is BindableObject replacementRoot)
         {
             CopyRootBindableValues(replacementRoot, targetRoot);
@@ -934,30 +1161,137 @@ internal static class XamlHotReloadAgent
         return true;
     }
 
+    private static object CreateReplacement(Type viewType, object target, out object bindingContext)
+    {
+        bindingContext = target is BindableObject targetBindable
+            ? targetBindable.BindingContext
+            : null;
+
+        object replacement;
+        try
+        {
+            replacement = Activator.CreateInstance(viewType);
+        }
+        catch (MissingMethodException)
+        {
+            return null;
+        }
+
+        if (replacement is BindableObject replacementBindable)
+            replacementBindable.BindingContext = bindingContext;
+
+        return replacement;
+    }
+
+    private static bool TryCollectStructuralTree(BindableObject root, out List<BindableObject> tree)
+    {
+        tree = new List<BindableObject>();
+        return TryCollectStructuralTree(root, tree);
+    }
+
+    private static bool TryCollectStructuralTree(BindableObject item, List<BindableObject> tree)
+    {
+        tree.Add(item);
+
+        foreach (var child in GetStructuralChildren(item))
+        {
+            if (child is not BindableObject bindableChild)
+                return false;
+
+            if (!TryCollectStructuralTree(bindableChild, tree))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static IEnumerable<object> GetStructuralChildren(BindableObject item)
+    {
+        switch (item)
+        {
+            case ContentPage page when page.Content != null:
+                yield return page.Content;
+                yield break;
+            case ContentView contentView when contentView.Content != null:
+                yield return contentView.Content;
+                yield break;
+            case ScrollView scrollView when scrollView.Content != null:
+                yield return scrollView.Content;
+                yield break;
+            case Border border when border.Content != null:
+                yield return border.Content;
+                yield break;
+            case Layout layout:
+                foreach (var child in layout.Children)
+                    yield return child;
+                yield break;
+            default:
+                var contentProperty = item.GetType().GetProperty("Content", BindingFlags.Public | BindingFlags.Instance);
+                if (contentProperty?.GetIndexParameters().Length == 0 && contentProperty.PropertyType != typeof(string))
+                {
+                    object content = null;
+                    try
+                    {
+                        content = contentProperty.GetValue(item);
+                    }
+                    catch
+                    {
+                    }
+
+                    if (content != null && !ReferenceEquals(content, item))
+                        yield return content;
+                }
+
+                yield break;
+        }
+    }
+
+    private static bool HaveSameStructure(List<BindableObject> targetTree, List<BindableObject> replacementTree)
+    {
+        if (targetTree.Count != replacementTree.Count)
+            return false;
+
+        for (var i = 0; i < targetTree.Count; i++)
+        {
+            if (targetTree[i].GetType() != replacementTree[i].GetType())
+                return false;
+        }
+
+        return true;
+    }
+
     private static bool TryMoveContent(object source, object target)
     {
         switch (target)
         {
             case ContentPage targetPage when source is ContentPage sourcePage:
                 var pageContent = sourcePage.Content;
+                if (ReferenceEquals(targetPage.Content, pageContent))
+                    return true;
                 sourcePage.Content = null;
                 targetPage.Content = null;
                 targetPage.Content = pageContent;
                 return true;
             case ContentView targetContentView when source is ContentView sourceContentView:
                 var contentViewContent = sourceContentView.Content;
+                if (ReferenceEquals(targetContentView.Content, contentViewContent))
+                    return true;
                 sourceContentView.Content = null;
                 targetContentView.Content = null;
                 targetContentView.Content = contentViewContent;
                 return true;
             case ScrollView targetScrollView when source is ScrollView sourceScrollView:
                 var scrollContent = sourceScrollView.Content;
+                if (ReferenceEquals(targetScrollView.Content, scrollContent))
+                    return true;
                 sourceScrollView.Content = null;
                 targetScrollView.Content = null;
                 targetScrollView.Content = scrollContent;
                 return true;
             case Border targetBorder when source is Border sourceBorder:
                 var borderContent = sourceBorder.Content;
+                if (ReferenceEquals(targetBorder.Content, borderContent))
+                    return true;
                 sourceBorder.Content = null;
                 targetBorder.Content = null;
                 targetBorder.Content = borderContent;
@@ -981,15 +1315,145 @@ internal static class XamlHotReloadAgent
             if (!source.IsSet(property) || ShouldSkipRootBindableProperty(property))
                 continue;
 
+            if (IsReadOnlyPropertyInfo?.GetValue(property) is true)
+                continue;
+
             try
             {
-                target.SetValue(property, source.GetValue(property));
+                var value = source.GetValue(property);
+                if (value is Element)
+                    continue;
+                target.SetValue(property, value);
             }
             catch
             {
                 // Some bindable properties are one-shot or root-specific. Keep reload best-effort.
             }
         }
+    }
+
+    private static int CopyInPlaceBindableValues(BindableObject source, BindableObject target)
+    {
+        var changedValues = 0;
+        foreach (var property in GetBindableProperties(source.GetType()))
+        {
+            if (!source.IsSet(property) || ShouldSkipInPlaceBindableProperty(property))
+                continue;
+
+            try
+            {
+                var sourceValue = source.GetValue(property);
+                var targetValue = target.GetValue(property);
+                var sourceIsBound = IsBound(source, property);
+                var targetIsBound = IsBound(target, property);
+
+                if (sourceIsBound || targetIsBound)
+                {
+                    if (sourceIsBound != targetIsBound || !Equals(sourceValue, targetValue))
+                        return -1;
+
+                    continue;
+                }
+
+                if (Equals(sourceValue, targetValue))
+                    continue;
+
+                target.SetValue(property, sourceValue);
+                changedValues++;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        return changedValues;
+    }
+
+    private static bool IsBound(BindableObject item, BindableProperty property)
+    {
+        try
+        {
+            return GetIsBoundMethod?.Invoke(item, new object[] { property }) is bool value && value;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool DataTemplateContainsMatchingView(object templateOrSelector, string resourcePath)
+    {
+        try
+        {
+            DataTemplate template = null;
+
+            if (templateOrSelector is DataTemplateSelector)
+            {
+                // Can't probe without data context — skip rather than blindly reset
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: skipping DataTemplateSelector (cannot probe without data)");
+                return false;
+            }
+
+            template = templateOrSelector as DataTemplate;
+            if (template == null)
+                return false;
+
+            var content = template.CreateContent();
+            if (content == null)
+                return false;
+
+            if (content is ViewCell cell)
+                content = cell.View;
+
+            if (content == null)
+                return false;
+
+            // Check the root element
+            var contentType = content.GetType();
+            if (IsMatchingXamlView(contentType, resourcePath))
+            {
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: template probe — root {contentType.Name} matches {Path.GetFileName(resourcePath)}");
+                return true;
+            }
+
+            // Walk descendants to see if the changed view is nested inside the template
+            if (content is BindableObject bindableContent)
+            {
+                var seen = new HashSet<object>(ReferenceEqualityComparer.Instance) { bindableContent };
+                foreach (var descendant in EnumerateBindableDescendants(bindableContent, seen))
+                {
+                    var descType = descendant.GetType();
+                    if (IsMatchingXamlView(descType, resourcePath))
+                    {
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload: template probe — descendant {descType.Name} (XamlPath='{GetXamlFilePath(descType)}') matches {Path.GetFileName(resourcePath)}");
+                        return true;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: DataTemplateContainsMatchingView probe failed: {ex.Message}");
+            return false;
+        }
+
+        return false;
+    }
+
+    private static BindableProperty[] GetDataTemplateProperties(Type type)
+    {
+        return DataTemplatePropertiesByType.GetOrAdd(type, static t =>
+        {
+            var result = new List<BindableProperty>();
+            foreach (var property in GetBindableProperties(t))
+            {
+                if (typeof(DataTemplate).IsAssignableFrom(property.ReturnType) ||
+                    typeof(DataTemplateSelector).IsAssignableFrom(property.ReturnType))
+                    result.Add(property);
+            }
+            return result.ToArray();
+        });
     }
 
     private static BindableProperty[] GetBindableProperties(Type type)
@@ -1018,9 +1482,34 @@ internal static class XamlHotReloadAgent
 
     private static bool ShouldSkipRootBindableProperty(BindableProperty property)
     {
+        if (property == BindableObject.BindingContextProperty)
+            return true;
+
+        switch (property.PropertyName)
+        {
+            case "Content":
+            case "AutomationId":
+            case "Navigation":
+            case "Title":
+                return true;
+        }
+
+        // Skip readonly properties (MAUI internal flag)
+        try
+        {
+            if (IsReadOnlyPropertyInfo?.GetValue(property) is true)
+                return true;
+        }
+        catch { }
+
+        return false;
+    }
+
+    private static bool ShouldSkipInPlaceBindableProperty(BindableProperty property)
+    {
         return property == BindableObject.BindingContextProperty ||
-            property.PropertyName == "Content" ||
-            property.PropertyName == "AutomationId";
+            property.PropertyName == "AutomationId" ||
+            StructuralPropertyNames.Contains(property.PropertyName);
     }
 
     private static void CopyGeneratedFields(object source, object target, Type viewType)
@@ -1099,6 +1588,110 @@ internal static class XamlHotReloadAgent
         return Array.Empty<object>();
     }
 
+    private static List<BindableObject> GetWindowPages()
+    {
+        var pages = new List<BindableObject>();
+        var app = Application.Current;
+        if (app == null)
+            return pages;
+
+        foreach (var window in app.Windows)
+        {
+            if (window?.Page == null)
+                continue;
+
+            pages.Add(window.Page);
+
+            INavigation nav = null;
+            try { nav = window.Page.Navigation; } catch { }
+            if (nav == null)
+                continue;
+
+            try
+            {
+                foreach (var page in nav.NavigationStack)
+                    if (page != null)
+                        pages.Add(page);
+            }
+            catch { }
+
+            try
+            {
+                foreach (var modal in nav.ModalStack)
+                {
+                    if (modal == null)
+                        continue;
+
+                    pages.Add(modal);
+
+                    if (modal is NavigationPage navPage)
+                    {
+                        try
+                        {
+                            foreach (var p in navPage.Navigation.NavigationStack)
+                                if (p != null)
+                                    pages.Add(p);
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        return pages;
+    }
+
+    private static IEnumerable<object> GetReloadCandidates(IEnumerable activeViews)
+    {
+        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        foreach (var root in activeViews)
+        {
+            if (root == null || !seen.Add(root))
+                continue;
+
+            yield return root;
+
+            if (root is not BindableObject bindableRoot)
+                continue;
+
+            foreach (var descendant in EnumerateBindableDescendants(bindableRoot, seen))
+                yield return descendant;
+        }
+
+        // Fallback: walk Application.Current.Windows + modal stacks
+        // Pages created before MauiHotReloadHelper.IsEnabled was set won't be in ActiveViews
+        foreach (var page in GetWindowPages())
+        {
+            if (!seen.Add(page))
+                continue;
+
+            yield return page;
+
+            foreach (var descendant in EnumerateBindableDescendants(page, seen))
+                yield return descendant;
+        }
+    }
+
+    private static IEnumerable<object> EnumerateBindableDescendants(BindableObject root, HashSet<object> seen)
+    {
+        var stack = new Stack<BindableObject>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            var current = stack.Pop();
+            foreach (var child in GetStructuralChildren(current))
+            {
+                if (child is not BindableObject bindableChild || !seen.Add(bindableChild))
+                    continue;
+
+                yield return bindableChild;
+                stack.Push(bindableChild);
+            }
+        }
+    }
+
     private static bool TryGetResource(string resourcePath, out string xaml, out string matchedKey)
     {
         if (Resources.TryGetValue(resourcePath, out xaml))
@@ -1110,7 +1703,7 @@ internal static class XamlHotReloadAgent
         foreach (var entry in Resources)
         {
             if (resourcePath.EndsWith('/' + entry.Key, StringComparison.OrdinalIgnoreCase) ||
-                resourcePath.EndsWith(entry.Key, StringComparison.OrdinalIgnoreCase))
+                entry.Key.EndsWith('/' + resourcePath, StringComparison.OrdinalIgnoreCase))
             {
                 xaml = entry.Value;
                 matchedKey = entry.Key;
