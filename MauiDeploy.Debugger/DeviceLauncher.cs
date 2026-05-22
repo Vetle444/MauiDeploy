@@ -53,6 +53,7 @@ public class DeviceLauncher : IDisposable
                    $"--device=:v2:udid={_config.DeviceId} " +
                    $"--argument=-monodevelop-port --argument={_config.DebugPort} " +
                    $"--setenv=__XAMARIN_DEBUG_PORT__={_config.DebugPort} " +
+                   $"--setenv=__XAMARIN_DEBUG_HOSTS__=127.0.0.1 " +
                    $"--wait-for-exit";
 
         onOutput($"mlaunch {args}");

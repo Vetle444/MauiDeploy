@@ -59,6 +59,7 @@ let sbLogs: vscode.StatusBarItem;
 // ── Lifecycle ──────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext) {
+    augmentProcessPath();
     ctx = context;
     loadState();
     createStatusBar(context);
@@ -231,6 +232,107 @@ function markdownTooltip(value: string): vscode.MarkdownString {
     return new vscode.MarkdownString(value, true);
 }
 
+// ── Tooling preflight ─────────────────────────────────
+
+function augmentProcessPath() {
+    // macOS apps launched from Finder/Dock don't inherit shell PATH, so /opt/homebrew/bin
+    // (Apple Silicon brew) and /usr/local/bin (Intel brew) may be missing. Without those,
+    // tools like iproxy/adb/brew can't be found even when they're installed.
+    if (process.platform !== 'darwin') { return; }
+    const extras = ['/opt/homebrew/bin', '/opt/homebrew/sbin', '/usr/local/bin'];
+    const current = (process.env.PATH || '').split(path.delimiter);
+    const additions = extras.filter(p => !current.includes(p) && fs.existsSync(p));
+    if (additions.length > 0) {
+        process.env.PATH = [...additions, ...current].join(path.delimiter);
+    }
+}
+
+
+interface ToolRequirement {
+    command: string;
+    brewPackage: string;
+    reason: string;
+}
+
+async function isOnPath(command: string): Promise<boolean> {
+    try {
+        await execFileAsync('which', [command]);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function ensureToolsAvailable(tools: ToolRequirement[]): Promise<boolean> {
+    const missing: ToolRequirement[] = [];
+    for (const tool of tools) {
+        if (!await isOnPath(tool.command)) {
+            missing.push(tool);
+        }
+    }
+    if (missing.length === 0) { return true; }
+
+    if (!await isOnPath('brew')) {
+        const cmds = missing.map(m => `brew install ${m.brewPackage}`).join(' && ');
+        vscode.window.showErrorMessage(
+            `MAUI Deploy needs ${missing.map(m => m.command).join(', ')} but they're not on PATH. ` +
+            `Install Homebrew from https://brew.sh, then run: ${cmds}`
+        );
+        return false;
+    }
+
+    const packages = Array.from(new Set(missing.map(m => m.brewPackage)));
+    return await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: `Installing ${packages.join(', ')} via Homebrew…`,
+            cancellable: false,
+        },
+        async () => {
+            try {
+                await execFileAsync('brew', ['install', ...packages], { maxBuffer: 64 * 1024 * 1024 });
+            } catch (error: unknown) {
+                const message = error instanceof Error ? error.message : String(error);
+                vscode.window.showErrorMessage(
+                    `brew install ${packages.join(' ')} failed: ${message.split('\n')[0]}. ` +
+                    `Run it manually in a terminal to see full output.`
+                );
+                return false;
+            }
+
+            for (const tool of missing) {
+                if (!await isOnPath(tool.command)) {
+                    vscode.window.showErrorMessage(
+                        `brew install completed but ${tool.command} is still not on PATH. ` +
+                        `You may need to open a new shell or check the brew install output.`
+                    );
+                    return false;
+                }
+            }
+            return true;
+        }
+    );
+}
+
+function toolsForCurrentTarget(): ToolRequirement[] {
+    const tools: ToolRequirement[] = [];
+    if (state.devicePlatform === 'iOS' && state.deviceType === 'physical') {
+        tools.push({
+            command: 'iproxy',
+            brewPackage: 'libimobiledevice',
+            reason: 'physical iOS USB tunnel for SDB + XAML Hot Reload',
+        });
+    }
+    if (state.devicePlatform === 'Android') {
+        tools.push({
+            command: 'adb',
+            brewPackage: 'android-platform-tools',
+            reason: 'Android deployment and logcat',
+        });
+    }
+    return tools;
+}
+
 // ── Commands ───────────────────────────────────────────
 
 function registerCommands(context: vscode.ExtensionContext) {
@@ -366,7 +468,7 @@ function startXamlHotReloadWatcher(session: vscode.DebugSession) {
 
     const projectDirectory = path.dirname(projectPath);
     xamlHotReloadSession = session;
-    startXamlHotReloadTunnel(session);
+    void startXamlHotReloadTunnel(session);
     xamlHotReloadWatcher = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(projectDirectory, '**/*.xaml')
     );
@@ -462,7 +564,14 @@ async function sendXamlHotReload(session: vscode.DebugSession, projectPath: stri
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         debugLog(`Hot Reload: failed — ${message}`);
-        vscode.window.showErrorMessage(`MAUI XAML Hot Reload failed: ${message}`);
+        const isTimeout = isTransientXamlHotReloadConnectionError(error);
+        const actions = isTimeout ? ['Show Tunnel Log'] : [];
+        vscode.window.showErrorMessage(`MAUI XAML Hot Reload failed: ${message}`, ...actions)
+            .then(choice => {
+                if (choice === 'Show Tunnel Log') {
+                    getTunnelLogChannel().show();
+                }
+            });
     }
 }
 
@@ -472,16 +581,31 @@ function showXamlHotReloadResult(filePath: string, resourcePath: string, details
     const inPlaceReloads = readMetric(details, 'inPlaceReloads');
     const freshReloads = readMetric(details, 'freshReloads');
     const cachedResource = readMetric(details, 'cachedResource');
+    const reloadError = readQuotedField(details, 'reloadError');
+
+    const fileName = path.basename(filePath);
 
     if (cachedResource === 1 && matchedViews === 0) {
-        debugLog(`Hot Reload: ${path.basename(filePath)} cached for next navigation`);
-        vscode.window.setStatusBarMessage(`MAUI XAML Hot Reload cached ${path.basename(filePath)} for next navigation`, 3000);
+        debugLog(`Hot Reload: ${fileName} cached for next navigation`);
+        vscode.window.setStatusBarMessage(`MAUI XAML Hot Reload cached ${fileName} for next navigation`, 3000);
         return;
     }
 
     if (matchedViews === 0 || explicitReloads === 0) {
-        debugLog(`Hot Reload: no views updated for ${path.basename(filePath)}`);
-        vscode.window.showWarningMessage(`MAUI XAML Hot Reload did not update ${path.basename(filePath)}. ${details}`);
+        debugLog(`Hot Reload: no views updated for ${fileName} ${reloadError ? `(${reloadError})` : ''}`);
+        const message = reloadError
+            ? `Could not hot reload ${fileName}: structural change can't be applied live. Navigate away and back to that page to see the update.`
+            : `Could not hot reload ${fileName}: no matching live view. Navigate to that page to see the update.`;
+        vscode.window.showWarningMessage(message, 'Show Details')
+            .then(choice => {
+                if (choice === 'Show Details') {
+                    const channel = getHotReloadLogChannel();
+                    channel.appendLine(`--- ${new Date().toISOString()} — ${fileName} ---`);
+                    if (reloadError) { channel.appendLine(`reloadError: ${reloadError}`); }
+                    channel.appendLine(details);
+                    channel.show();
+                }
+            });
         return;
     }
 
@@ -490,7 +614,7 @@ function showXamlHotReloadResult(filePath: string, resourcePath: string, details
     vscode.window.setStatusBarMessage(`MAUI XAML Hot Reload ${mode} ${path.basename(filePath)}`, 2000);
 }
 
-function startXamlHotReloadTunnel(session: vscode.DebugSession) {
+async function startXamlHotReloadTunnel(session: vscode.DebugSession) {
     stopXamlHotReloadTunnel();
 
     const platform = session.configuration.platform;
@@ -502,21 +626,49 @@ function startXamlHotReloadTunnel(session: vscode.DebugSession) {
     }
 
     if (platform === 'iOS' && deviceType === 'physical') {
-        const process = spawn('iproxy', [`${xamlHotReloadPort}:${xamlHotReloadPort}`, '-u', deviceId], {
-            stdio: 'ignore',
-        });
+        if (!await ensureToolsAvailable([{
+            command: 'iproxy',
+            brewPackage: 'libimobiledevice',
+            reason: 'physical iOS USB tunnel for SDB + XAML Hot Reload',
+        }])) {
+            return;
+        }
+        const log = getTunnelLogChannel();
+        log.appendLine(`[tunnel] starting: iproxy ${xamlHotReloadPort}:${xamlHotReloadPort} -u ${deviceId}`);
+        const process = spawn('iproxy', [`${xamlHotReloadPort}:${xamlHotReloadPort}`, '-u', deviceId]);
+        process.stdout?.on('data', (chunk: Buffer) => log.append(`[iproxy] ${chunk.toString()}`));
+        process.stderr?.on('data', (chunk: Buffer) => log.append(`[iproxy stderr] ${chunk.toString()}`));
         process.on('error', error => {
+            log.appendLine(`[tunnel] iproxy spawn error: ${error.message}`);
             vscode.window.showWarningMessage(`MAUI XAML Hot Reload tunnel failed: ${error.message}`);
+        });
+        process.on('exit', (code, signal) => {
+            log.appendLine(`[tunnel] iproxy exited (code=${code}, signal=${signal})`);
         });
         xamlHotReloadTunnel = { platform, deviceId, process };
         return;
     }
 
     if (platform === 'Android') {
+        if (!await ensureToolsAvailable([{
+            command: 'adb',
+            brewPackage: 'android-platform-tools',
+            reason: 'Android deployment and logcat',
+        }])) {
+            return;
+        }
         xamlHotReloadTunnel = { platform, deviceId };
         void execFileAsync('adb', ['-s', deviceId, 'forward', `tcp:${xamlHotReloadPort}`, `tcp:${xamlHotReloadPort}`])
             .catch(error => vscode.window.showWarningMessage(`MAUI XAML Hot Reload adb forward failed: ${error.message}`));
     }
+}
+
+let tunnelLogChannel: vscode.OutputChannel | undefined;
+function getTunnelLogChannel(): vscode.OutputChannel {
+    if (!tunnelLogChannel) {
+        tunnelLogChannel = vscode.window.createOutputChannel('MAUI Deploy: Hot Reload Tunnel');
+    }
+    return tunnelLogChannel;
 }
 
 function stopXamlHotReloadTunnel() {
@@ -574,7 +726,7 @@ function postText(endpoint: string, body: string): Promise<string> {
             port: xamlHotReloadPort,
             path: endpoint,
             method: 'POST',
-            timeout: 5000,
+            timeout: 30000,
             headers: {
                 'Content-Type': 'application/json; charset=utf-8',
                 'Content-Length': Buffer.byteLength(body, 'utf8'),
@@ -606,6 +758,19 @@ function readMetric(details: string, name: string): number | undefined {
     return match ? Number(match[1]) : undefined;
 }
 
+function readQuotedField(details: string, name: string): string | undefined {
+    const match = new RegExp(`${name}='([^']*)'`).exec(details);
+    return match && match[1].length > 0 ? match[1] : undefined;
+}
+
+let hotReloadLogChannel: vscode.OutputChannel | undefined;
+function getHotReloadLogChannel(): vscode.OutputChannel {
+    if (!hotReloadLogChannel) {
+        hotReloadLogChannel = vscode.window.createOutputChannel('MAUI Deploy: Hot Reload');
+    }
+    return hotReloadLogChannel;
+}
+
 function stripUtf8Bom(value: string): string {
     return value.charCodeAt(0) === 0xFEFF ? value.slice(1) : value;
 }
@@ -634,6 +799,8 @@ async function cmdRun() {
         );
         return;
     }
+
+    if (!await ensureToolsAvailable(toolsForCurrentTarget())) { return; }
 
     isBuilding = true;
     sbRun.text = '$(sync~spin)';
@@ -712,6 +879,8 @@ async function cmdDeployFromBin() {
         );
         return;
     }
+
+    if (!await ensureToolsAvailable(toolsForCurrentTarget())) { return; }
 
     isBuilding = true;
     sbDeployFromBin.text = '$(sync~spin)';
@@ -801,6 +970,8 @@ async function cmdDebug() {
         );
         return;
     }
+
+    if (!await ensureToolsAvailable(toolsForCurrentTarget())) { return; }
 
     // Boot iOS simulator if needed (skip for physical devices)
     if (state.devicePlatform === 'iOS' && state.deviceType !== 'physical') {

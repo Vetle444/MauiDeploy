@@ -170,8 +170,14 @@ async function detectAndroidDevices(): Promise<Device[]> {
 
 export async function bootSimulator(deviceId: string): Promise<boolean> {
     try {
-        await execFileAsync('xcrun', ['simctl', 'boot', deviceId]);
+        try {
+            await execFileAsync('xcrun', ['simctl', 'boot', deviceId]);
+        } catch (e: any) {
+            const msg = String(e?.stderr ?? e?.message ?? '');
+            if (!/already booted|state:\s*Booted/i.test(msg)) { throw e; }
+        }
         await execFileAsync('open', ['-a', 'Simulator']);
+        await execFileAsync('xcrun', ['simctl', 'bootstatus', deviceId, '-b']);
         return true;
     } catch { return false; }
 }

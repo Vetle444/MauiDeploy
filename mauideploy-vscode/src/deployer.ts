@@ -505,6 +505,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -523,6 +524,7 @@ internal static class XamlHotReloadAgent
     private static readonly object Gate = new();
     private static readonly ConcurrentDictionary<string, string> Resources = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<Type, BindableProperty[]> BindablePropertiesByType = new();
+    private static readonly ConcurrentDictionary<Type, byte> InitializeComponentDeadList = new();
     private static readonly ConcurrentDictionary<Type, FieldInfo[]> GeneratedFieldsByType = new();
     private static readonly ConcurrentDictionary<Type, string> XamlFilePathByType = new();
     private static readonly ConcurrentDictionary<Type, BindableProperty[]> DataTemplatePropertiesByType = new();
@@ -586,7 +588,8 @@ internal static class XamlHotReloadAgent
         var version = Interlocked.Increment(ref applyVersion);
 
         // Skip reload if XAML is identical to what we already cached
-        if (Resources.TryGetValue(normalizedPath, out var existing) && existing == xaml)
+        Resources.TryGetValue(normalizedPath, out var previousXaml);
+        if (previousXaml == xaml)
         {
             Debug.WriteLine($"[MauiDeploy] Hot Reload v{version}: skipped (identical to previous)");
             return $"Skipped XAML Hot Reload v{version} for {normalizedPath} (unchanged). {GetStatus(normalizedPath)}";
@@ -608,7 +611,7 @@ internal static class XamlHotReloadAgent
         Interlocked.Exchange(ref providerHits, 0);
 
         MauiHotReloadHelper.IsEnabled = true;
-        ReloadOnMainThread(normalizedPath);
+        ReloadOnMainThread(normalizedPath, previousXaml, xaml);
 
         var status = GetStatus(normalizedPath);
         Debug.WriteLine($"[MauiDeploy] Hot Reload v{version}: done. {status}");
@@ -797,11 +800,11 @@ internal static class XamlHotReloadAgent
         }
     }
 
-    private static void ReloadOnMainThread(string resourcePath)
+    private static void ReloadOnMainThread(string resourcePath, string previousXaml, string newXaml)
     {
         if (MainThread.IsMainThread)
         {
-            ReloadMatchingViews(resourcePath);
+            ReloadMatchingViews(resourcePath, previousXaml, newXaml);
             return;
         }
 
@@ -812,7 +815,7 @@ internal static class XamlHotReloadAgent
         {
             try
             {
-                ReloadMatchingViews(resourcePath);
+                ReloadMatchingViews(resourcePath, previousXaml, newXaml);
             }
             catch (Exception ex)
             {
@@ -824,7 +827,7 @@ internal static class XamlHotReloadAgent
             }
         });
 
-        if (!completed.Wait(TimeSpan.FromSeconds(5)))
+        if (!completed.Wait(TimeSpan.FromSeconds(30)))
             throw new TimeoutException("Timed out waiting for XAML Hot Reload on the UI thread.");
 
         if (captured != null)
@@ -842,7 +845,6 @@ internal static class XamlHotReloadAgent
 
         Interlocked.Increment(ref providerHits);
         lastMatchedPath = resourcePath;
-        Debug.WriteLine($"[MauiDeploy] ResourceProvider: serving cached XAML for {resourcePath}");
 
         return new ResourceLoader.ResourceLoadingResponse
         {
@@ -851,7 +853,7 @@ internal static class XamlHotReloadAgent
         };
     }
 
-    private static int ReloadMatchingViews(string resourcePath)
+    private static int ReloadMatchingViews(string resourcePath, string previousXaml, string newXaml)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var activeViews = 0;
@@ -878,30 +880,73 @@ internal static class XamlHotReloadAgent
                     continue;
 
                 matchedViews++;
-                var scanMs = sw.ElapsedMilliseconds;
-                Debug.WriteLine($"[MauiDeploy] Hot Reload: matched {viewType.Name} (#{matchedViews}) after scanning {activeViews} views in {scanMs}ms");
 
-                try
+                var reloadSw = System.Diagnostics.Stopwatch.StartNew();
+
+                // Fast path: surgically patch attribute-only XAML changes without re-parsing the whole page.
+                // Bails to fallback on any structural / markup-extension / unknown property change.
+                var fastResult = (item is BindableObject fastTarget && !string.IsNullOrEmpty(previousXaml))
+                    ? RunReloadStrategy(viewType, "FastPath",
+                        () => TryReloadPropertyOnly(fastTarget, previousXaml, newXaml))
+                    : ReloadStrategyResult.Rejected;
+                if (fastResult == ReloadStrategyResult.Succeeded)
                 {
-                    var reloadSw = System.Diagnostics.Stopwatch.StartNew();
-                    if (TryReloadViaInitializeComponent(item, viewType))
+                    reloadedViews++;
+                    inPlaceReloadedViews++;
+                    Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} via fast-path in {reloadSw.ElapsedMilliseconds}ms");
+                    continue;
+                }
+
+                var initResult = InitializeComponentDeadList.ContainsKey(viewType)
+                    ? ReloadStrategyResult.Rejected
+                    : RunReloadStrategy(viewType, "InitializeComponent",
+                        () => TryReloadViaInitializeComponent(item, viewType));
+                if (initResult != ReloadStrategyResult.Succeeded)
+                {
+                    InitializeComponentDeadList.TryAdd(viewType, 0);
+                }
+                if (initResult == ReloadStrategyResult.Succeeded)
+                {
+                    reloadedViews++;
+                    inPlaceReloadedViews++;
+                    InitializeComponentDeadList.TryRemove(viewType, out _);
+                    Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} via InitializeComponent in {reloadSw.ElapsedMilliseconds}ms");
+                }
+                else
+                {
+                    object replacement = null;
+                    object bindingContext = null;
+                    try
+                    {
+                        replacement = CreateReplacement(viewType, item, out bindingContext);
+                    }
+                    catch (Exception ex)
+                    {
+                        var unwrapped = UnwrapException(ex);
+                        lastReloadError = "CreateReplacement: " + FormatException(unwrapped);
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload: CreateReplacement failed for {viewType.Name}: {unwrapped}");
+                    }
+
+                    var createMs = reloadSw.ElapsedMilliseconds;
+                    var inPlaceResult = replacement == null
+                        ? ReloadStrategyResult.Rejected
+                        : RunReloadStrategy(viewType, "InPlace",
+                            () => TryReloadInPlace(item, replacement, bindingContext));
+
+                    if (inPlaceResult == ReloadStrategyResult.Succeeded)
                     {
                         reloadedViews++;
                         inPlaceReloadedViews++;
-                        Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} via InitializeComponent in {reloadSw.ElapsedMilliseconds}ms");
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} in-place in {reloadSw.ElapsedMilliseconds}ms (create: {createMs}ms)");
                     }
                     else
                     {
-                        // Create replacement once for both in-place and fresh strategies
-                        var replacement = CreateReplacement(viewType, item, out var bindingContext);
-                        var createMs = reloadSw.ElapsedMilliseconds;
-                        if (replacement != null && TryReloadInPlace(item, replacement, bindingContext))
-                        {
-                            reloadedViews++;
-                            inPlaceReloadedViews++;
-                            Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} in-place in {reloadSw.ElapsedMilliseconds}ms (create: {createMs}ms)");
-                        }
-                        else if (replacement != null && TryReloadFromReplacement(item, replacement, bindingContext, viewType))
+                        var freshResult = replacement == null
+                            ? ReloadStrategyResult.Rejected
+                            : RunReloadStrategy(viewType, "FromReplacement",
+                                () => TryReloadFromReplacement(item, replacement, bindingContext, viewType));
+
+                        if (freshResult == ReloadStrategyResult.Succeeded)
                         {
                             reloadedViews++;
                             freshReloadedViews++;
@@ -909,14 +954,9 @@ internal static class XamlHotReloadAgent
                         }
                         else
                         {
-                            Debug.WriteLine($"[MauiDeploy] Hot Reload: could not reload {viewType.Name} (neither in-place nor fresh succeeded)");
+                            Debug.WriteLine($"[MauiDeploy] Hot Reload: could not reload {viewType.Name} (init={initResult}, inPlace={inPlaceResult}, fresh={freshResult}); will rebuild on next navigation");
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    lastReloadError = FormatException(UnwrapException(ex));
-                    Debug.WriteLine($"[MauiDeploy] Hot Reload: reload failed for {viewType.Name}: {ex}");
                 }
             }
         }
@@ -1033,6 +1073,206 @@ internal static class XamlHotReloadAgent
         });
     }
 
+    // Fast-path: collect attribute deltas in a validation pass, then apply atomically.
+    // Returns false if anything looks structural / markup-extension / non-trivial — caller falls back.
+    private static bool TryReloadPropertyOnly(BindableObject root, string oldXaml, string newXaml)
+    {
+        if (string.IsNullOrEmpty(oldXaml) || string.IsNullOrEmpty(newXaml))
+            return false;
+        if (oldXaml == newXaml)
+            return true;
+
+        System.Xml.Linq.XDocument oldDoc, newDoc;
+        try
+        {
+            oldDoc = System.Xml.Linq.XDocument.Parse(oldXaml);
+            newDoc = System.Xml.Linq.XDocument.Parse(newXaml);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: fast-path parse failed — {ex.Message}");
+            return false;
+        }
+
+        var changes = new List<FastPathChange>();
+        if (!TryCollectFastPathChanges(oldDoc.Root, newDoc.Root, root, changes))
+            return false;
+
+        foreach (var change in changes)
+        {
+            try { change.Target.SetValue(change.Property, change.Value); }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: fast-path SetValue failed for {change.Property.PropertyName} — {ex.Message}");
+                return false;
+            }
+        }
+
+        Debug.WriteLine($"[MauiDeploy] Hot Reload: fast-path applied {changes.Count} attribute change(s)");
+        return true;
+    }
+
+    private struct FastPathChange
+    {
+        public BindableObject Target;
+        public BindableProperty Property;
+        public object Value;
+    }
+
+    private static bool TryCollectFastPathChanges(System.Xml.Linq.XElement oldEl, System.Xml.Linq.XElement newEl, BindableObject live, List<FastPathChange> changes)
+    {
+        if (oldEl.Name != newEl.Name)
+            return false;
+
+        // Bail if any non-whitespace text content (e.g., <Label>Hello</Label>) — we don't patch text.
+        if (HasTextContent(oldEl) || HasTextContent(newEl))
+            return false;
+
+        var liveType = live.GetType();
+
+        // Attributes
+        foreach (var newAttr in newEl.Attributes())
+        {
+            if (newAttr.IsNamespaceDeclaration)
+                continue;
+            var localName = newAttr.Name.LocalName;
+            if (localName.Contains('.'))
+                return false; // attached property (e.g., Grid.Row) — bail
+            if (newAttr.Name.NamespaceName.Length > 0 && newAttr.Name.NamespaceName != oldEl.Name.NamespaceName)
+                continue; // x:Name, x:Key, etc — ignore
+
+            var oldAttr = oldEl.Attribute(newAttr.Name);
+            if (oldAttr != null && oldAttr.Value == newAttr.Value)
+                continue;
+
+            var value = newAttr.Value;
+            if (value.StartsWith("{") && value.EndsWith("}"))
+                return false; // markup extension — bail
+
+            var property = FindBindablePropertyByName(liveType, localName);
+            if (property == null)
+                return false;
+
+            if (!TryConvertSimpleValue(value, property.ReturnType, out var converted))
+                return false;
+
+            changes.Add(new FastPathChange { Target = live, Property = property, Value = converted });
+        }
+
+        // Removed attribute would require resetting to default — bail.
+        foreach (var oldAttr in oldEl.Attributes())
+        {
+            if (oldAttr.IsNamespaceDeclaration)
+                continue;
+            if (newEl.Attribute(oldAttr.Name) == null)
+                return false;
+        }
+
+        // Property elements (Grid.RowDefinitions etc.) — bail if not byte-equal.
+        var oldPropEls = oldEl.Elements().Where(e => e.Name.LocalName.Contains('.')).ToList();
+        var newPropEls = newEl.Elements().Where(e => e.Name.LocalName.Contains('.')).ToList();
+        if (oldPropEls.Count != newPropEls.Count)
+            return false;
+        for (var i = 0; i < oldPropEls.Count; i++)
+        {
+            if (!System.Xml.Linq.XNode.DeepEquals(oldPropEls[i], newPropEls[i]))
+                return false;
+        }
+
+        // Element children → must align with live structural children
+        var oldChildren = oldEl.Elements().Where(e => !e.Name.LocalName.Contains('.')).ToList();
+        var newChildren = newEl.Elements().Where(e => !e.Name.LocalName.Contains('.')).ToList();
+        if (oldChildren.Count != newChildren.Count)
+            return false;
+
+        var liveChildren = new List<BindableObject>();
+        foreach (var child in GetStructuralChildren(live))
+        {
+            if (child is BindableObject bindable)
+                liveChildren.Add(bindable);
+            else
+                return false;
+        }
+        if (liveChildren.Count != oldChildren.Count)
+            return false;
+
+        for (var i = 0; i < oldChildren.Count; i++)
+        {
+            if (!TryCollectFastPathChanges(oldChildren[i], newChildren[i], liveChildren[i], changes))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool HasTextContent(System.Xml.Linq.XElement el)
+    {
+        foreach (var node in el.Nodes())
+        {
+            if (node is System.Xml.Linq.XText text && !string.IsNullOrWhiteSpace(text.Value))
+                return true;
+        }
+        return false;
+    }
+
+    private static BindableProperty FindBindablePropertyByName(Type type, string propertyName)
+    {
+        var fieldName = propertyName + "Property";
+        for (var t = type; t != null && t != typeof(object); t = t.BaseType)
+        {
+            var field = t.GetField(fieldName, BindingFlags.Public | BindingFlags.Static);
+            if (field != null && field.GetValue(null) is BindableProperty bp)
+                return bp;
+        }
+        return null;
+    }
+
+    private static bool TryConvertSimpleValue(string value, Type targetType, out object result)
+    {
+        result = null;
+        try
+        {
+            if (targetType == typeof(string))
+            {
+                result = value;
+                return true;
+            }
+            var underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
+            if (underlying.IsEnum)
+            {
+                result = System.Enum.Parse(underlying, value, ignoreCase: true);
+                return true;
+            }
+            var converter = System.ComponentModel.TypeDescriptor.GetConverter(underlying);
+            if (converter != null && converter.CanConvertFrom(typeof(string)))
+            {
+                result = converter.ConvertFromInvariantString(value);
+                return true;
+            }
+        }
+        catch
+        {
+        }
+        return false;
+    }
+
+    private enum ReloadStrategyResult { Succeeded, Rejected, Failed }
+
+    private static ReloadStrategyResult RunReloadStrategy(Type viewType, string name, Func<bool> strategy)
+    {
+        try
+        {
+            return strategy() ? ReloadStrategyResult.Succeeded : ReloadStrategyResult.Rejected;
+        }
+        catch (Exception ex)
+        {
+            var unwrapped = UnwrapException(ex);
+            lastReloadError = name + ": " + FormatException(unwrapped);
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: {name} threw for {viewType.Name}: {unwrapped}");
+            return ReloadStrategyResult.Failed;
+        }
+    }
+
     private static bool TryReloadInPlace(object target, object replacement, object bindingContext)
     {
         if (GetIsBoundMethod == null)
@@ -1147,18 +1387,41 @@ internal static class XamlHotReloadAgent
     {
         if (target is BindableObject targetRoot && replacement is BindableObject replacementRoot)
         {
-            CopyRootBindableValues(replacementRoot, targetRoot);
-            CopyNameScope(replacementRoot, targetRoot);
+            SafeStep("CopyRootBindableValues", () => CopyRootBindableValues(replacementRoot, targetRoot));
+            SafeStep("CopyNameScope", () => CopyNameScope(replacementRoot, targetRoot));
         }
 
-        if (!TryMoveContent(replacement, target))
+        bool moved;
+        try
+        {
+            moved = TryMoveContent(replacement, target);
+        }
+        catch (Exception ex)
+        {
+            var unwrapped = UnwrapException(ex);
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: TryMoveContent threw: {unwrapped}");
+            throw;
+        }
+        if (!moved)
             return false;
 
         if (target is BindableObject targetBindableAfterMove)
-            targetBindableAfterMove.BindingContext = bindingContext;
+            SafeStep("BindingContext", () => targetBindableAfterMove.BindingContext = bindingContext);
 
-        CopyGeneratedFields(replacement, target, viewType);
+        SafeStep("CopyGeneratedFields", () => CopyGeneratedFields(replacement, target, viewType));
         return true;
+    }
+
+    private static void SafeStep(string name, Action step)
+    {
+        try
+        {
+            step();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: {name} swallowed — {UnwrapException(ex).Message}");
+        }
     }
 
     private static object CreateReplacement(Type viewType, object target, out object bindingContext)
@@ -1516,7 +1779,14 @@ internal static class XamlHotReloadAgent
     {
         foreach (var field in GetGeneratedFields(viewType))
         {
-            field.SetValue(target, field.GetValue(source));
+            try
+            {
+                field.SetValue(target, field.GetValue(source));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: skipped field {field.Name} — {UnwrapException(ex).Message}");
+            }
         }
     }
 
@@ -1568,15 +1838,35 @@ internal static class XamlHotReloadAgent
 
     private static string FormatException(Exception exception)
     {
-        var message = (exception.Message ?? string.Empty)
+        var message = SanitizeForResponse(exception.Message ?? string.Empty, 200);
+        var frame = string.Empty;
+        var stack = exception.StackTrace;
+        if (!string.IsNullOrEmpty(stack))
+        {
+            var newline = stack.IndexOf((char)10);
+            var firstLine = newline >= 0 ? stack.Substring(0, newline) : stack;
+            firstLine = SanitizeForResponse(firstLine.Trim(), 240);
+            if (firstLine.Length > 0)
+                frame = " @ " + firstLine;
+        }
+
+        return exception.GetType().Name + ": " + message + frame;
+    }
+
+    private static string SanitizeForResponse(string value, int maxLength)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        value = value
             .Replace((char)13, (char)32)
             .Replace((char)10, (char)32)
             .Replace((char)39, (char)32);
 
-        if (message.Length > 500)
-            message = message.Substring(0, 500);
+        if (value.Length > maxLength)
+            value = value.Substring(0, maxLength);
 
-        return exception.GetType().Name + ": " + message;
+        return value;
     }
 
     private static IEnumerable GetActiveViews()

@@ -190,9 +190,11 @@ public class MauiDebugSession : DebugAdapterBase
         }
         else if (_config.Platform == "iOS")
         {
-            // iOS simulator: app listens, we connect after launch
-            startArgs = CreateRetryingConnectArgs(_config.AppName, _config.DebugPort);
-            listensFirst = false;
+            // iOS simulator: debugger listens on loopback, app connects to us.
+            // Microsoft.iOS runtime defaults to client mode — it dials
+            // __XAMARIN_DEBUG_HOSTS__:__XAMARIN_DEBUG_PORT__ at startup.
+            startArgs = new SoftDebuggerListenArgs(_config.AppName, IPAddress.Loopback, _config.DebugPort);
+            listensFirst = true;
         }
         else
         {
@@ -246,7 +248,7 @@ public class MauiDebugSession : DebugAdapterBase
     {
         return new SoftDebuggerConnectArgs(appName, IPAddress.Loopback, debugPort)
         {
-            MaxConnectionAttempts = 20,
+            MaxConnectionAttempts = 120,
             TimeBetweenConnectionAttempts = 500,
         };
     }
