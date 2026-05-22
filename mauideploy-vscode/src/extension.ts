@@ -7,13 +7,13 @@ import { promisify } from 'util';
 import {
     detectPlatforms, detectAllDevices, bootSimulator,
     Platform, Device, RecentDevice, isMauiProject,
-    findIosAppBundle, findAndroidApk
+    findIosAppBundle, findAndroidApk, getAndroidPackageId
 } from './devices';
 import { findWorkspaceMauiProjects, findWorkspaceCsprojs, findCsprojsInDir } from './projects';
 import {
     buildAndDeploy, deployFromBin, buildForDebug, openLogViewer, disposeTerminals,
-    askCopilotToFixLastBuildFailure, runTests, startHotReload, stopHotReload,
-    isHotReloadRunning, onDidChangeHotReloadStatus
+    askCopilotToFixLastBuildFailure, runTests,
+    BuildResult
 } from './deployer';
 
 const execFileAsync = promisify(execFile);
@@ -36,6 +36,11 @@ interface State {
 let state: State = { config: 'Debug', recentDevices: [] };
 let ctx: vscode.ExtensionContext;
 let isBuilding = false;
+
+// ── Device Cache ───────────────────────────────────────
+let cachedDevices: Device[] = [];
+let devicePollTimer: ReturnType<typeof setInterval> | undefined;
+const DEVICE_POLL_INTERVAL_MS = 60_000;
 let xamlHotReloadWatcher: vscode.FileSystemWatcher | undefined;
 let xamlHotReloadSession: vscode.DebugSession | undefined;
 let xamlHotReloadTunnel: { platform: 'iOS' | 'Android'; deviceId: string; process?: ChildProcess } | undefined;
@@ -49,7 +54,6 @@ const lastAppliedXamlByFile = new Map<string, string>();
 let sbRun: vscode.StatusBarItem;
 let sbDeployFromBin: vscode.StatusBarItem;
 let sbDebug: vscode.StatusBarItem;
-let sbHotReload: vscode.StatusBarItem;
 let sbTests: vscode.StatusBarItem;
 let sbProject: vscode.StatusBarItem;
 let sbConfig: vscode.StatusBarItem;
@@ -65,14 +69,38 @@ export function activate(context: vscode.ExtensionContext) {
     createStatusBar(context);
     registerCommands(context);
     registerDebugHotReload(context);
-    context.subscriptions.push(onDidChangeHotReloadStatus(updateStatusBar));
     autoDetectProject();
-    context.subscriptions.push({ dispose: () => { stopXamlHotReloadWatcher(); disposeTerminals(); } });
+    startDevicePolling();
+    context.subscriptions.push({ dispose: () => { stopDevicePolling(); stopXamlHotReloadWatcher(); disposeTerminals(); } });
 }
 
 export function deactivate() {
+    stopDevicePolling();
     stopXamlHotReloadWatcher();
     disposeTerminals();
+}
+
+// ── Device Polling ─────────────────────────────────────
+
+function startDevicePolling() {
+    refreshDeviceCache();
+    devicePollTimer = setInterval(refreshDeviceCache, DEVICE_POLL_INTERVAL_MS);
+}
+
+function stopDevicePolling() {
+    if (devicePollTimer) {
+        clearInterval(devicePollTimer);
+        devicePollTimer = undefined;
+    }
+}
+
+async function refreshDeviceCache() {
+    if (!state.projectPath) { return; }
+    const platforms = detectPlatforms(state.projectPath);
+    if (platforms.length === 0) { return; }
+    try {
+        cachedDevices = await detectAllDevices(platforms);
+    } catch { /* detection can fail if tools aren't installed */ }
 }
 
 // ── Status Bar Creation ────────────────────────────────
@@ -90,10 +118,6 @@ function createStatusBar(context: vscode.ExtensionContext) {
     sbDebug = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     sbDebug.command = 'mauideploy.debug';
     context.subscriptions.push(sbDebug);
-
-    sbHotReload = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99.75);
-    sbHotReload.command = 'mauideploy.hotReload';
-    context.subscriptions.push(sbHotReload);
 
     sbTests = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99.5);
     sbTests.command = 'mauideploy.runTests';
@@ -123,6 +147,7 @@ function updateStatusBar() {
     if (!isBuilding) {
         sbRun.text = '$(play)';
         sbRun.color = '#89d185';
+        sbRun.backgroundColor = undefined;
         const key = process.platform === 'darwin' ? 'Cmd+Shift+R' : 'Ctrl+Shift+R';
         const target = state.deviceName
             ? `Build & deploy to **${state.deviceName}**`
@@ -135,10 +160,13 @@ function updateStatusBar() {
     if (!isBuilding) {
         sbDeployFromBin.text = '$(rocket)';
         sbDeployFromBin.color = '#4ec9b0';
+        sbDeployFromBin.backgroundColor = undefined;
         const target = state.deviceName
             ? `Deploy existing build to **${state.deviceName}**`
             : 'Deploy existing build from bin';
-        sbDeployFromBin.tooltip = markdownTooltip(`**$(rocket) Deploy from Bin** — ${target}\n\nUses the app already in \`bin/${state.config}\``);
+        sbDeployFromBin.tooltip = markdownTooltip(
+            `**$(rocket) Deploy from Bin** — ${target}\n\nSkips build — uses the app already in \`bin/${state.config}\``
+        );
     }
     sbDeployFromBin.show();
 
@@ -146,38 +174,22 @@ function updateStatusBar() {
     if (!isBuilding) {
         sbDebug.text = '$(bug)';
         sbDebug.color = '#cca700';
+        sbDebug.backgroundColor = undefined;
         sbDebug.command = 'mauideploy.debug';
         sbDebug.tooltip = markdownTooltip(
-            `**$(bug) Debug** — Build with breakpoints and XAML Hot Reload\n\nUses Mono SDB debugger`
+            `**$(bug) Debug** — Build with breakpoints & XAML Hot Reload\n\nAttaches Mono SDB debugger · saves XAML changes are live-reloaded`
         );
     }
     sbDebug.show();
-
-    // ── Hot Reload button ──
-    if (!isBuilding) {
-        if (isHotReloadRunning()) {
-            sbHotReload.text = '$(flame) Hot';
-            sbHotReload.color = '#ff8c42';
-            sbHotReload.command = 'mauideploy.stopHotReload';
-            sbHotReload.tooltip = markdownTooltip(
-                `**$(flame) Watch Run** — Running for **${state.deviceName || 'selected device'}**\n\nClick to stop`
-            );
-        } else {
-            sbHotReload.text = '$(flame)';
-            sbHotReload.color = '#ff8c42';
-            sbHotReload.command = 'mauideploy.hotReload';
-            sbHotReload.tooltip = markdownTooltip(
-                '**$(flame) Watch Run** — Run with `dotnet watch`\n\nExperimental rebuild/rerun watcher. Does not attach the debugger.'
-            );
-        }
-    }
-    sbHotReload.show();
 
     // ── Tests button ──
     if (!isBuilding) {
         sbTests.text = '$(beaker)';
         sbTests.color = '#c586c0';
-        sbTests.tooltip = markdownTooltip('**$(beaker) Run Tests** — Pick a `.csproj` to test');
+        sbTests.backgroundColor = undefined;
+        sbTests.tooltip = markdownTooltip(
+            '**$(beaker) Run Tests** — Pick a `.csproj` and run `dotnet test`'
+        );
     }
     sbTests.show();
 
@@ -186,42 +198,48 @@ function updateStatusBar() {
         const name = path.basename(state.projectPath, '.csproj');
         sbProject.text = `$(file-code) ${name}`;
         sbProject.color = undefined;
+        const dir = path.dirname(state.projectPath).replace(process.env.HOME || '', '~');
         sbProject.tooltip = markdownTooltip(
-            `**Project:** ${name}\n\n` +
-            `$(folder) \`${path.dirname(state.projectPath)}\`\n\nClick to change`
+            `**Project:** ${name}\n\n$(folder) \`${dir}\`\n\nClick to change`
         );
     } else {
         sbProject.text = '$(file-code) Select Project…';
         sbProject.color = '#888888';
-        sbProject.tooltip = 'Click to select a MAUI project';
+        sbProject.tooltip = markdownTooltip('Click to select a .NET MAUI project');
     }
     sbProject.show();
 
     // ── Config ──
-    sbConfig.text = state.config;
+    const configIcon = state.config === 'Debug' ? '$(tools)' : '$(package)';
+    sbConfig.text = `${configIcon} ${state.config}`;
     sbConfig.color = state.config === 'Debug' ? '#dcdcaa' : '#4ec9b0';
-    sbConfig.tooltip = `Configuration: ${state.config}\n\nClick to toggle`;
+    sbConfig.tooltip = markdownTooltip(
+        `**Configuration:** ${state.config}\n\nClick to toggle between Debug and Release`
+    );
     sbConfig.show();
 
     // ── Device ──
     if (state.deviceName) {
-        const icon = state.devicePlatform === 'iOS' ? '$(device-mobile)' : '$(vm)';
+        const icon = state.deviceType === 'physical' ? '$(plug)' :
+            state.devicePlatform === 'iOS' ? '$(device-mobile)' : '$(vm)';
         sbDevice.text = `${icon} ${state.deviceName}`;
         sbDevice.color = undefined;
-        sbDevice.tooltip = markdownTooltip(
-            `**${state.devicePlatform}** — ${state.deviceName}\n\nClick to change`
-        );
+        const details = [
+            `**${state.devicePlatform}** ${state.deviceType === 'physical' ? 'Device' : 'Simulator'}`,
+            state.deviceName,
+        ].join(' — ');
+        sbDevice.tooltip = markdownTooltip(`${details}\n\nClick to change`);
     } else {
         sbDevice.text = '$(device-mobile) Select Device…';
         sbDevice.color = '#888888';
-        sbDevice.tooltip = 'Click to select a target device';
+        sbDevice.tooltip = markdownTooltip('Click to select a target device');
     }
     sbDevice.show();
 
     // ── Logs ──
     sbLogs.text = '$(output)';
     sbLogs.color = '#888888';
-    sbLogs.tooltip = 'Open log viewer';
+    sbLogs.tooltip = markdownTooltip('**$(output) Logs** — Open device log viewer');
     sbLogs.show();
 
     vscode.commands.executeCommand('setContext', 'mauideploy.ready',
@@ -230,6 +248,47 @@ function updateStatusBar() {
 
 function markdownTooltip(value: string): vscode.MarkdownString {
     return new vscode.MarkdownString(value, true);
+}
+
+function formatElapsed(ms: number): string {
+    const seconds = Math.floor(ms / 1000);
+    if (seconds < 60) { return `${seconds}s`; }
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}m ${seconds % 60}s`;
+}
+
+/** Creates a progress callback that updates a status bar item with build progress.
+ *  Uses the MAX of a time-based asymptotic curve and real MSBuild log
+ *  file size, so the progress always fills smoothly and accelerates when
+ *  real build data is available. */
+function createStatusBarReporter(item: vscode.StatusBarItem, label: string) {
+    let lastPercent = 0;
+    return (elapsedMs: number, buildPercent: number) => {
+        const timeBased = Math.min(90, 90 * (1 - Math.exp(-elapsedMs / 1000 / 40)));
+        const targetPercent = buildPercent > timeBased ? buildPercent : timeBased;
+        const pct = Math.round(targetPercent);
+        if (targetPercent - lastPercent >= 0.5 || targetPercent === lastPercent) {
+            item.text = `$(sync~spin) ${pct}%`;
+            item.tooltip = `${label} — ${formatElapsed(elapsedMs)}`;
+            lastPercent = targetPercent;
+        }
+    };
+}
+
+function formatDuration(ms: number): string {
+    const seconds = Math.round(ms / 1000);
+    if (seconds < 60) { return `${seconds}s`; }
+    const minutes = Math.floor(seconds / 60);
+    const remaining = seconds % 60;
+    return remaining > 0 ? `${minutes}m ${remaining}s` : `${minutes}m`;
+}
+
+function flashError(item: vscode.StatusBarItem) {
+    item.text = '$(error)';
+    item.color = '#f44747';
+    item.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+    item.tooltip = 'Build failed — check the Build Errors panel';
+    setTimeout(() => updateStatusBar(), 4000);
 }
 
 // ── Tooling preflight ─────────────────────────────────
@@ -340,8 +399,6 @@ function registerCommands(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('mauideploy.run', cmdRun),
         vscode.commands.registerCommand('mauideploy.deployFromBin', cmdDeployFromBin),
         vscode.commands.registerCommand('mauideploy.debug', cmdDebug),
-        vscode.commands.registerCommand('mauideploy.hotReload', cmdHotReload),
-        vscode.commands.registerCommand('mauideploy.stopHotReload', cmdStopHotReload),
         vscode.commands.registerCommand('mauideploy.runTests', cmdRunTests),
         vscode.commands.registerCommand('mauideploy.pickProject', cmdPickProject),
         vscode.commands.registerCommand('mauideploy.toggleConfig', cmdToggleConfig),
@@ -349,92 +406,6 @@ function registerCommands(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('mauideploy.openLogs', cmdOpenLogs),
         vscode.commands.registerCommand('mauideploy.fixBuildErrorWithCopilot', askCopilotToFixLastBuildFailure),
     );
-}
-
-// ── Hot Reload ────────────────────────────────────────
-
-async function cmdHotReload() {
-    if (isHotReloadRunning()) {
-        cmdStopHotReload();
-        return;
-    }
-    if (isBuilding) { return; }
-
-    if (!state.projectPath || !fs.existsSync(state.projectPath)) {
-        if (!await cmdPickProject()) { return; }
-    }
-
-    if (!state.deviceId || !state.devicePlatform) {
-        if (!await cmdPickDevice()) { return; }
-    }
-
-    const platforms = detectPlatforms(state.projectPath!);
-    const platform = platforms.find(p => p.name === state.devicePlatform);
-    if (!platform) {
-        vscode.window.showErrorMessage(
-            `Project doesn't target ${state.devicePlatform}. Pick a different device.`
-        );
-        return;
-    }
-
-    if (state.config !== 'Debug') {
-        const choice = await vscode.window.showWarningMessage(
-            'Hot Reload requires the Debug configuration.',
-            'Switch to Debug',
-            'Cancel'
-        );
-        if (choice !== 'Switch to Debug') { return; }
-
-        state.config = 'Debug';
-        saveState();
-        updateStatusBar();
-    }
-
-    if (state.devicePlatform === 'iOS' && state.deviceType !== 'physical') {
-        const allDevices = await detectAllDevices(platforms);
-        const device = allDevices.find(d => d.id === state.deviceId);
-        if (device && device.state === 'Shutdown') {
-            const booted = await vscode.window.withProgress(
-                { location: vscode.ProgressLocation.Notification, title: `Booting ${state.deviceName}…` },
-                () => bootSimulator(device.id)
-            );
-            if (!booted) {
-                vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
-                return;
-            }
-        }
-    }
-
-    isBuilding = true;
-    sbHotReload.text = '$(sync~spin)';
-    sbHotReload.color = '#dcdcaa';
-    sbHotReload.tooltip = 'Starting Hot Reload…';
-
-    try {
-        const device: Device = {
-            id: state.deviceId!, name: state.deviceName!,
-            platform: state.devicePlatform!, state: 'Booted',
-            type: state.deviceType || 'simulator',
-            display: state.deviceName!
-        };
-
-        const started = await startHotReload(state.projectPath!, platform, device);
-        if (started) {
-            vscode.window.showInformationMessage(
-                `Watch Run started for ${state.deviceName}. Save files to rebuild and rerun.`
-            );
-        }
-    } finally {
-        isBuilding = false;
-        updateStatusBar();
-    }
-}
-
-function cmdStopHotReload() {
-    if (!isHotReloadRunning()) { return; }
-    stopHotReload();
-    updateStatusBar();
-    vscode.window.showInformationMessage('Watch Run stopped.');
 }
 
 // ── Debug XAML Hot Reload ─────────────────────────────
@@ -813,11 +784,9 @@ async function cmdRun() {
             const allDevices = await detectAllDevices(platforms);
             const device = allDevices.find(d => d.id === state.deviceId);
             if (device && device.state === 'Shutdown') {
+                sbRun.text = '$(sync~spin)';
                 sbRun.tooltip = `Booting ${state.deviceName}…`;
-                const booted = await vscode.window.withProgress(
-                    { location: vscode.ProgressLocation.Notification, title: `Booting ${state.deviceName}…` },
-                    () => bootSimulator(device.id)
-                );
+                const booted = await bootSimulator(device.id);
                 if (!booted) {
                     vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
                     return;
@@ -834,23 +803,30 @@ async function cmdRun() {
             display: state.deviceName!
         };
 
-        const success = await buildAndDeploy(state.projectPath!, platform, device, state.config);
+        const projectName = path.basename(state.projectPath!, '.csproj');
+        const result = await buildAndDeploy(
+            state.projectPath!, platform, device, state.config,
+            undefined,
+            createStatusBarReporter(sbRun, `Building ${projectName}`)
+        );
 
-        if (success) {
+        if (result.success) {
+            const duration = formatDuration(result.durationMs);
             sbRun.text = '$(check)';
             sbRun.color = '#89d185';
-            sbRun.tooltip = `Deployed to ${state.deviceName}`;
+            sbRun.tooltip = `Deployed to ${state.deviceName} in ${duration}`;
             vscode.window.showInformationMessage(
-                `Deployed to ${state.deviceName}`,
+                `Deployed to ${state.deviceName} in ${duration}`,
                 'Open Logs'
             ).then(choice => {
                 if (choice === 'Open Logs') { cmdOpenLogs(); }
             });
             setTimeout(() => updateStatusBar(), 3000);
+        } else {
+            flashError(sbRun);
         }
     } finally {
         isBuilding = false;
-        // Don't call updateStatusBar here — let the success flash timeout do it
         if (sbRun.text === '$(sync~spin)') { updateStatusBar(); }
     }
 }
@@ -893,11 +869,9 @@ async function cmdDeployFromBin() {
             const allDevices = await detectAllDevices(platforms);
             const device = allDevices.find(d => d.id === state.deviceId);
             if (device && device.state === 'Shutdown') {
+                sbDeployFromBin.text = '$(sync~spin)';
                 sbDeployFromBin.tooltip = `Booting ${state.deviceName}…`;
-                const booted = await vscode.window.withProgress(
-                    { location: vscode.ProgressLocation.Notification, title: `Booting ${state.deviceName}…` },
-                    () => bootSimulator(device.id)
-                );
+                const booted = await bootSimulator(device.id);
                 if (!booted) {
                     vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
                     return;
@@ -978,10 +952,9 @@ async function cmdDebug() {
         const allDevices = await detectAllDevices(platforms);
         const device = allDevices.find(d => d.id === state.deviceId);
         if (device && device.state === 'Shutdown') {
-            const booted = await vscode.window.withProgress(
-                { location: vscode.ProgressLocation.Notification, title: `Booting ${state.deviceName}…` },
-                () => bootSimulator(device.id)
-            );
+            sbDebug.text = '$(sync~spin)';
+            sbDebug.tooltip = `Booting ${state.deviceName}…`;
+            const booted = await bootSimulator(device.id);
             if (!booted) {
                 vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
                 return;
@@ -996,8 +969,14 @@ async function cmdDebug() {
 
     try {
         // Build with debug flags (MtouchDebug=true for iOS)
-        const buildSuccess = await buildForDebug(state.projectPath!, platform, state.config, state.deviceType);
-        if (!buildSuccess) {
+        const projectName = path.basename(state.projectPath!, '.csproj');
+        const buildResult = await buildForDebug(
+            state.projectPath!, platform, state.config, state.deviceType,
+            undefined,
+            createStatusBarReporter(sbDebug, `Building ${projectName} for debug`)
+        );
+        if (!buildResult.success) {
+            flashError(sbDebug);
             return;
         }
 
@@ -1026,6 +1005,8 @@ async function cmdDebug() {
             deviceName: state.deviceName!,
             deviceType: state.deviceType || 'simulator',
             programPath: programPath,
+            applicationId: state.devicePlatform === 'Android'
+                ? getAndroidPackageId(state.projectPath!) : undefined,
         };
 
         const started = await vscode.debug.startDebugging(workspaceFolder, debugConfig);
@@ -1056,13 +1037,20 @@ async function cmdRunTests() {
     sbTests.tooltip = `Running tests for ${path.basename(testProject.projectPath)}…`;
 
     try {
-        const success = await runTests(testProject.projectPath, testProject.config);
-        if (success) {
+        const testName = path.basename(testProject.projectPath, '.csproj');
+        const result = await runTests(
+            testProject.projectPath, testProject.config, undefined,
+            createStatusBarReporter(sbTests, `Running tests — ${testName}`)
+        );
+        if (result.success) {
+            const duration = formatDuration(result.durationMs);
             sbTests.text = '$(check)';
             sbTests.color = '#89d185';
-            sbTests.tooltip = `Tests passed for ${path.basename(testProject.projectPath)}`;
-            vscode.window.showInformationMessage(`Tests passed for ${path.basename(testProject.projectPath)}`);
+            sbTests.tooltip = `Tests passed for ${testName} in ${duration}`;
+            vscode.window.showInformationMessage(`Tests passed for ${testName} in ${duration}`);
             setTimeout(() => updateStatusBar(), 3000);
+        } else {
+            flashError(sbTests);
         }
     } finally {
         isBuilding = false;
@@ -1369,97 +1357,120 @@ async function cmdPickDevice(): Promise<boolean> {
         return false;
     }
 
-    const allDevices = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Window, title: 'Detecting devices…' },
-        () => detectAllDevices(platforms)
-    );
-
     interface Item extends vscode.QuickPickItem { device?: Device; }
-    const items: Item[] = [];
 
-    // Recently used (still available)
-    const recentIds = new Set<string>();
-    const recentAvailable = state.recentDevices
-        .filter(r => allDevices.some(d => d.id === r.id))
-        .slice(0, 5);
+    const buildDeviceItems = (devices: Device[]): Item[] => {
+        const items: Item[] = [];
+        const recentIds = new Set<string>();
+        const recentAvailable = state.recentDevices
+            .filter(r => devices.some(d => d.id === r.id))
+            .slice(0, 5);
 
-    if (recentAvailable.length > 0) {
-        items.push({ label: 'Recently Used', kind: vscode.QuickPickItemKind.Separator });
-        for (const r of recentAvailable) {
-            recentIds.add(r.id);
-            const device = allDevices.find(d => d.id === r.id)!;
-            const { icon, stateLabel } = deviceVisuals(device);
-            const isCurrent = device.id === state.deviceId;
-            items.push({
-                label: `${isCurrent ? '$(check)' : '$(history)'}  ${device.name}`,
-                description: device.runtime || device.platform,
-                detail: stateLabel,
-                device
-            });
+        if (recentAvailable.length > 0) {
+            items.push({ label: 'Recently Used', kind: vscode.QuickPickItemKind.Separator });
+            for (const r of recentAvailable) {
+                recentIds.add(r.id);
+                const device = devices.find(d => d.id === r.id)!;
+                const { stateLabel } = deviceVisuals(device);
+                const isCurrent = device.id === state.deviceId;
+                items.push({
+                    label: `${isCurrent ? '$(check)' : '$(history)'}  ${device.name}`,
+                    description: device.runtime || device.platform,
+                    detail: stateLabel,
+                    device
+                });
+            }
         }
-    }
 
-    // iOS physical devices (excluding recent)
-    const iosPhysical = allDevices.filter(d => d.platform === 'iOS' && d.type === 'physical' && !recentIds.has(d.id));
-    if (iosPhysical.length > 0) {
-        items.push({ label: 'iOS Devices', kind: vscode.QuickPickItemKind.Separator });
-        for (const d of iosPhysical) {
-            items.push({
-                label: `$(plug)  ${d.name}`,
-                description: d.runtime,
-                detail: '● Connected',
-                device: d
-            });
+        const iosPhysical = devices.filter(d => d.platform === 'iOS' && d.type === 'physical' && !recentIds.has(d.id));
+        if (iosPhysical.length > 0) {
+            items.push({ label: 'iOS Devices', kind: vscode.QuickPickItemKind.Separator });
+            for (const d of iosPhysical) {
+                items.push({
+                    label: `$(plug)  ${d.name}`,
+                    description: d.runtime,
+                    detail: '● Connected',
+                    device: d
+                });
+            }
         }
-    }
 
-    // iOS simulators (excluding recent)
-    const ios = allDevices.filter(d => d.platform === 'iOS' && d.type === 'simulator' && !recentIds.has(d.id));
-    if (ios.length > 0) {
-        items.push({ label: 'iOS Simulators', kind: vscode.QuickPickItemKind.Separator });
-        for (const d of ios) {
-            const { icon, stateLabel } = deviceVisuals(d);
-            items.push({
-                label: `${icon}  ${d.name}`,
-                description: d.runtime,
-                detail: stateLabel,
-                device: d
-            });
+        const ios = devices.filter(d => d.platform === 'iOS' && d.type === 'simulator' && !recentIds.has(d.id));
+        if (ios.length > 0) {
+            items.push({ label: 'iOS Simulators', kind: vscode.QuickPickItemKind.Separator });
+            for (const d of ios) {
+                const { icon, stateLabel } = deviceVisuals(d);
+                items.push({
+                    label: `${icon}  ${d.name}`,
+                    description: d.runtime,
+                    detail: stateLabel,
+                    device: d
+                });
+            }
         }
-    }
 
-    // Android devices (excluding recent)
-    const android = allDevices.filter(d => d.platform === 'Android' && !recentIds.has(d.id));
-    if (android.length > 0) {
-        items.push({ label: 'Android Devices', kind: vscode.QuickPickItemKind.Separator });
-        for (const d of android) {
-            items.push({
-                label: `$(plug)  ${d.name}`,
-                description: d.id,
-                detail: 'Connected',
-                device: d
-            });
+        const android = devices.filter(d => d.platform === 'Android' && !recentIds.has(d.id));
+        if (android.length > 0) {
+            items.push({ label: 'Android Devices', kind: vscode.QuickPickItemKind.Separator });
+            for (const d of android) {
+                items.push({
+                    label: `$(plug)  ${d.name}`,
+                    description: d.id,
+                    detail: 'Connected',
+                    device: d
+                });
+            }
         }
+
+        return items;
+    };
+
+    // Show picker immediately with cached devices, then refresh in background
+    const qp = vscode.window.createQuickPick<Item>();
+    qp.title = 'Select Target Device';
+    qp.placeholder = 'Type to search…';
+    qp.matchOnDescription = true;
+    qp.matchOnDetail = true;
+
+    // Populate with cached devices instantly
+    if (cachedDevices.length > 0) {
+        qp.items = buildDeviceItems(cachedDevices);
     }
 
-    if (allDevices.length === 0) {
-        const hint = platforms.some(p => p.name === 'iOS')
-            ? 'Start a simulator or connect an Android device.'
-            : 'Connect an Android device or start an emulator.';
-        vscode.window.showWarningMessage(`No devices found. ${hint}`);
-        return false;
-    }
+    // Start async refresh
+    qp.busy = true;
+    detectAllDevices(platforms).then(freshDevices => {
+        cachedDevices = freshDevices;
+        qp.items = buildDeviceItems(freshDevices);
+        qp.busy = false;
 
-    const picked = await vscode.window.showQuickPick(items, {
-        title: 'Select Target Device',
-        placeHolder: 'Type to search…',
-        matchOnDescription: true,
-        matchOnDetail: true,
+        if (freshDevices.length === 0 && cachedDevices.length === 0) {
+            const hint = platforms.some(p => p.name === 'iOS')
+                ? 'Start a simulator or connect an Android device.'
+                : 'Connect an Android device or start an emulator.';
+            qp.placeholder = `No devices found. ${hint}`;
+        }
+    }).catch(() => {
+        qp.busy = false;
     });
-    if (!picked?.device) { return false; }
 
-    setDevice(picked.device);
-    return true;
+    return new Promise<boolean>(resolve => {
+        qp.onDidAccept(() => {
+            const selected = qp.selectedItems[0];
+            qp.dispose();
+            if (selected?.device) {
+                setDevice(selected.device);
+                resolve(true);
+            } else {
+                resolve(false);
+            }
+        });
+        qp.onDidHide(() => {
+            qp.dispose();
+            resolve(false);
+        });
+        qp.show();
+    });
 }
 
 function deviceVisuals(d: Device): { icon: string; stateLabel: string } {
@@ -1553,24 +1564,28 @@ function isSamePath(left: string, right: string): boolean {
 
 // ── Persistence ────────────────────────────────────────
 
+/** Read from workspaceState first; fall back to globalState (last-used across workspaces). */
 function loadState() {
+    const ws = ctx.workspaceState;
+    const gs = ctx.globalState;
     state = {
-        projectPath: ctx.globalState.get('projectPath'),
-        config: ctx.globalState.get('config', 'Debug') as 'Debug' | 'Release',
-        deviceId: ctx.globalState.get('deviceId'),
-        deviceName: ctx.globalState.get('deviceName'),
-        devicePlatform: ctx.globalState.get('devicePlatform') as 'iOS' | 'Android' | undefined,
-        deviceType: ctx.globalState.get('deviceType') as 'simulator' | 'physical' | undefined,
-        recentDevices: ctx.globalState.get('recentDevices', []),
+        projectPath: ws.get('projectPath') ?? gs.get('projectPath'),
+        config: ws.get('config') ?? gs.get('config', 'Debug') as 'Debug' | 'Release',
+        deviceId: ws.get('deviceId') ?? gs.get('deviceId'),
+        deviceName: ws.get('deviceName') ?? gs.get('deviceName'),
+        devicePlatform: ws.get('devicePlatform') ?? gs.get('devicePlatform') as 'iOS' | 'Android' | undefined,
+        deviceType: ws.get('deviceType') ?? gs.get('deviceType') as 'simulator' | 'physical' | undefined,
+        recentDevices: ws.get('recentDevices') ?? gs.get('recentDevices', []),
     };
 }
 
+/** Save to workspaceState (per-workspace) AND globalState (last-used fallback). */
 function saveState() {
-    ctx.globalState.update('projectPath', state.projectPath);
-    ctx.globalState.update('config', state.config);
-    ctx.globalState.update('deviceId', state.deviceId);
-    ctx.globalState.update('deviceName', state.deviceName);
-    ctx.globalState.update('devicePlatform', state.devicePlatform);
-    ctx.globalState.update('deviceType', state.deviceType);
-    ctx.globalState.update('recentDevices', state.recentDevices);
+    const ws = ctx.workspaceState;
+    const gs = ctx.globalState;
+    const keys: (keyof State)[] = ['projectPath', 'config', 'deviceId', 'deviceName', 'devicePlatform', 'deviceType', 'recentDevices'];
+    for (const key of keys) {
+        ws.update(key, state[key]);
+        gs.update(key, state[key]);
+    }
 }

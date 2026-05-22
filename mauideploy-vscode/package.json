@@ -1,9 +1,10 @@
 {
-  "name": "mauideploy",
-  "displayName": "MAUI Deploy",
-  "description": "Rider-like toolbar for building, deploying, and debugging .NET MAUI apps",
-  "version": "0.3.0",
-  "publisher": "DIPS",
+  "name": "maui-deploy",
+  "displayName": "MauiDeploy",
+  "description": "Rider-like toolbar for building, deploying, and debugging with Hot-Reload in .NET MAUI apps",
+  "version": "1.0.0",
+  "author": "FinstadProductions",
+  "publisher": "FinstadProductions",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -18,7 +19,8 @@
     "dotnet",
     "debugger",
     "ios",
-    "android"
+    "android",
+    "hot reload"
   ],
   "engines": {
     "vscode": "^1.85.0"
@@ -27,6 +29,7 @@
     "Debuggers",
     "Other"
   ],
+  "icon": "icon.png",
   "activationEvents": [
     "workspaceContains:**/*.csproj"
   ],
@@ -44,21 +47,39 @@
         "configurationAttributes": {
           "launch": {
             "properties": {
-              "projectPath": { "type": "string" },
-              "configuration": { "type": "string" },
-              "platform": { "type": "string" },
-              "framework": { "type": "string" },
-              "deviceId": { "type": "string" },
-              "deviceName": { "type": "string" },
-              "programPath": { "type": "string" },
-              "debugPort": { "type": "number" }
+              "projectPath": {
+                "type": "string"
+              },
+              "configuration": {
+                "type": "string"
+              },
+              "platform": {
+                "type": "string"
+              },
+              "framework": {
+                "type": "string"
+              },
+              "deviceId": {
+                "type": "string"
+              },
+              "deviceName": {
+                "type": "string"
+              },
+              "programPath": {
+                "type": "string"
+              },
+              "debugPort": {
+                "type": "number"
+              }
             }
           }
         }
       }
     ],
     "breakpoints": [
-      { "language": "csharp" }
+      {
+        "language": "csharp"
+      }
     ],
     "commands": [
       {
@@ -75,16 +96,6 @@
         "command": "mauideploy.debug",
         "title": "MAUI Deploy: Debug",
         "icon": "$(bug)"
-      },
-      {
-        "command": "mauideploy.hotReload",
-        "title": "MAUI Deploy: Watch Run (Experimental)",
-        "icon": "$(flame)"
-      },
-      {
-        "command": "mauideploy.stopHotReload",
-        "title": "MAUI Deploy: Stop Watch Run",
-        "icon": "$(debug-stop)"
       },
       {
         "command": "mauideploy.runTests",

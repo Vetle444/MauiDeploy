@@ -6,13 +6,7 @@ import { Platform, Device, findIosAppBundle, findAndroidApk, getAndroidPackageId
 
 let buildTerminal: vscode.Terminal | undefined;
 let logTerminal: vscode.Terminal | undefined;
-let hotReloadTerminal: vscode.Terminal | undefined;
-let hotReloadCloseListener: vscode.Disposable | undefined;
-let hotReloadRunning = false;
 let buildErrorsOutput: vscode.OutputChannel | undefined;
-const hotReloadStatusEmitter = new vscode.EventEmitter<void>();
-
-export const onDidChangeHotReloadStatus = hotReloadStatusEmitter.event;
 
 interface BuildFailureContext {
     command: string;
@@ -24,7 +18,11 @@ interface BuildFailureContext {
 
 let lastBuildFailure: BuildFailureContext | undefined;
 
-function getBuildTerminal(): vscode.Terminal {
+function getBuildTerminal(fresh = true): vscode.Terminal {
+    if (fresh && buildTerminal && !buildTerminal.exitStatus) {
+        buildTerminal.dispose();
+        buildTerminal = undefined;
+    }
     if (buildTerminal && !buildTerminal.exitStatus) { return buildTerminal; }
     buildTerminal = vscode.window.createTerminal({
         name: 'MAUI Deploy — Build',
@@ -42,26 +40,6 @@ function getLogTerminal(): vscode.Terminal {
     return logTerminal;
 }
 
-function getHotReloadTerminal(): vscode.Terminal {
-    if (hotReloadTerminal && !hotReloadTerminal.exitStatus) { return hotReloadTerminal; }
-    hotReloadTerminal = vscode.window.createTerminal({
-        name: 'MAUI Deploy — Hot Reload',
-        iconPath: new vscode.ThemeIcon('flame')
-    });
-
-    hotReloadCloseListener?.dispose();
-    hotReloadCloseListener = vscode.window.onDidCloseTerminal(closedTerminal => {
-        if (closedTerminal !== hotReloadTerminal) { return; }
-
-        hotReloadTerminal = undefined;
-        hotReloadCloseListener?.dispose();
-        hotReloadCloseListener = undefined;
-        setHotReloadRunning(false);
-    });
-
-    return hotReloadTerminal;
-}
-
 function getBuildErrorsOutput(): vscode.OutputChannel {
     buildErrorsOutput ??= vscode.window.createOutputChannel('MAUI Deploy — Build Errors');
     return buildErrorsOutput;
@@ -71,14 +49,16 @@ export async function buildAndDeploy(
     projectPath: string,
     platform: Platform,
     device: Device,
-    config: string
-): Promise<boolean> {
+    config: string,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
     if (platform.name === 'iOS') {
         return device.type === 'physical'
-            ? buildAndDeployIosDevice(projectPath, platform, device, config)
-            : buildAndDeployIos(projectPath, platform, device, config);
+            ? buildAndDeployIosDevice(projectPath, platform, device, config, token, onProgress)
+            : buildAndDeployIos(projectPath, platform, device, config, token, onProgress);
     }
-    return buildAndDeployAndroid(projectPath, platform, device, config);
+    return buildAndDeployAndroid(projectPath, platform, device, config, token, onProgress);
 }
 
 export async function deployFromBin(
@@ -95,131 +75,33 @@ export async function deployFromBin(
     return launchAndroidFromBin(projectPath, platform, device, config);
 }
 
-export function isHotReloadRunning(): boolean {
-    return hotReloadRunning;
-}
-
-export async function startHotReload(
-    projectPath: string,
-    platform: Platform,
-    device: Device
-): Promise<boolean> {
-    if (isHotReloadRunning()) {
-        hotReloadTerminal?.show();
-        return true;
-    }
-
-    const terminal = getHotReloadTerminal();
-    terminal.show();
-    setHotReloadRunning(true);
-    terminal.sendText(createHotReloadCommand(projectPath, platform, device));
-    return true;
-}
-
-export function stopHotReload(): void {
-    const terminal = hotReloadTerminal;
-
-    hotReloadCloseListener?.dispose();
-    hotReloadCloseListener = undefined;
-    hotReloadTerminal = undefined;
-    setHotReloadRunning(false);
-    terminal?.dispose();
-}
-
-function setHotReloadRunning(running: boolean): void {
-    if (hotReloadRunning === running) { return; }
-    hotReloadRunning = running;
-    hotReloadStatusEmitter.fire();
-}
-
-function createHotReloadCommand(projectPath: string, platform: Platform, device: Device): string {
-    const watchEnv = hotReloadWatchEnvironment(platform, device);
-    const args = [
-        ...watchEnv.map(([name, value]) => shellEnvAssignment(name, value)),
-        'dotnet watch',
-        `--project ${shellQuote(projectPath)}`,
-        'build',
-        '--',
-        '-t:Run',
-        `-p:TargetFramework=${shellQuote(platform.framework)}`,
-        '-p:Configuration=Debug',
-        ...hotReloadPlatformArgs(platform, device)
-    ];
-
-    return [
-        `cd ${shellQuote(path.dirname(projectPath))}`,
-        `echo '▶ Starting Hot Reload...'`,
-        `echo 'Save supported C# or XAML changes to apply them. Stop this terminal to end Hot Reload.'`,
-        args.join(' ')
-    ].join(' && ');
-}
-
-function hotReloadWatchEnvironment(platform: Platform, device: Device): [string, string][] {
-    const properties: [string, string][] = [
-        ['TargetFramework', platform.framework],
-        ['Configuration', 'Debug']
-    ];
-
-    if (platform.name === 'Android') {
-        properties.push(['AdbTarget', `-s ${device.id}`]);
-        return properties;
-    }
-
-    properties.push(
-        ['MtouchDebug', 'true'],
-        ['_DeviceName', device.type === 'physical' ? device.id : `:v2:udid=${device.id}`]
-    );
-
-    if (device.type === 'physical') {
-        properties.push(['RuntimeIdentifier', 'ios-arm64']);
-    }
-
-    return properties;
-}
-
-function hotReloadPlatformArgs(platform: Platform, device: Device): string[] {
-    if (platform.name === 'Android') {
-        return [`/p:AdbTarget=${shellQuote(`-s ${device.id}`)}`];
-    }
-
-    if (device.type === 'physical') {
-        return [
-            '-p:MtouchDebug=true',
-            '-p:RuntimeIdentifier=ios-arm64',
-            `-p:_DeviceName=${shellQuote(device.id)}`
-        ];
-    }
-
-    return [
-        '-p:MtouchDebug=true',
-        `-p:_DeviceName=${shellQuote(`:v2:udid=${device.id}`)}`
-    ];
-}
-
 async function buildAndDeployIos(
     projectPath: string,
     platform: Platform,
     device: Device,
-    config: string
-): Promise<boolean> {
+    config: string,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
     const terminal = getBuildTerminal();
     terminal.show();
 
-    const buildSucceeded = await runBuildCommand(terminal, errorLogFile => {
-        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${msBuildErrorLoggerArg(errorLogFile)}`;
+    const result = await runBuildCommand(terminal, logArgs => {
+        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${logArgs}`;
         return `echo '▶ Building...' && ${buildCmd}`;
-    });
-    if (!buildSucceeded) {
-        return false;
+    }, 600_000, token, onProgress);
+    if (!result.success) {
+        return result;
     }
 
     const appPath = findIosAppBundle(projectPath, platform.framework, config);
     if (!appPath) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not find .app bundle.');
-        return false;
+        return result;
     }
 
-    return launchIosSimulatorApp(terminal, appPath, device);
+    await launchIosSimulatorApp(terminal, appPath, device);
+    return result;
 }
 
 async function launchIosSimulatorFromBin(
@@ -245,7 +127,7 @@ async function launchIosSimulatorApp(
     appPath: string,
     device: Device
 ): Promise<boolean> {
-    terminal.sendText(`echo '▶ Installing...' && xcrun simctl install ${device.id} "${appPath}"`);
+    sendSilent(terminal, `echo '▶ Installing...' && xcrun simctl install ${device.id} "${appPath}"`);
 
     const bundleId = await getBundleId(appPath);
     if (!bundleId) {
@@ -253,7 +135,7 @@ async function launchIosSimulatorApp(
         return false;
     }
 
-    terminal.sendText(
+    sendSilent(terminal,
         `xcrun simctl terminate ${device.id} ${bundleId} 2>/dev/null; ` +
         `echo '▶ Launching...' && xcrun simctl launch ${device.id} ${bundleId}`
     );
@@ -265,27 +147,30 @@ async function buildAndDeployIosDevice(
     projectPath: string,
     platform: Platform,
     device: Device,
-    config: string
-): Promise<boolean> {
+    config: string,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
     const terminal = getBuildTerminal();
     terminal.show();
 
     // Build for physical device (needs RuntimeIdentifier ios-arm64)
-    const buildSucceeded = await runBuildCommand(terminal, errorLogFile => {
-        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} -r ios-arm64 ${msBuildErrorLoggerArg(errorLogFile)}`;
+    const result = await runBuildCommand(terminal, logArgs => {
+        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} -r ios-arm64 ${logArgs}`;
         return `echo '▶ Building for device...' && ${buildCmd}`;
-    });
-    if (!buildSucceeded) {
-        return false;
+    }, 600_000, token, onProgress);
+    if (!result.success) {
+        return result;
     }
 
     const appPath = findIosAppBundle(projectPath, platform.framework, config);
     if (!appPath) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not find .app bundle.');
-        return false;
+        return result;
     }
 
-    return launchIosDeviceApp(terminal, appPath, device);
+    await launchIosDeviceApp(terminal, appPath, device);
+    return result;
 }
 
 async function launchIosDeviceFromBin(
@@ -318,12 +203,12 @@ async function launchIosDeviceApp(
     }
 
     // Install via devicectl
-    terminal.sendText(
+    sendSilent(terminal,
         `echo '▶ Installing on device...' && xcrun devicectl device install app --device ${device.id} "${appPath}"`
     );
 
     // Launch via devicectl
-    terminal.sendText(
+    sendSilent(terminal,
         `echo '▶ Launching...' && xcrun devicectl device process launch --device ${device.id} ${bundleId}`
     );
 
@@ -334,23 +219,25 @@ async function buildAndDeployAndroid(
     projectPath: string,
     platform: Platform,
     device: Device,
-    config: string
-): Promise<boolean> {
+    config: string,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
     const terminal = getBuildTerminal();
     terminal.show();
 
-    const succeeded = await runBuildCommand(terminal, errorLogFile => {
+    return runBuildCommand(terminal, logArgs => {
         const buildCmd = [
             `dotnet build "${projectPath}"`,
             `-t:Run`,
             `-f ${platform.framework}`,
             `-c ${config}`,
             `/p:AdbTarget="-s ${device.id}"`,
-            msBuildErrorLoggerArg(errorLogFile)
+            ...androidFastBuildProps(config),
+            logArgs
         ].join(' ');
         return `echo '▶ Building & deploying...' && ${buildCmd}`;
-    });
-    return succeeded;
+    }, 600_000, token, onProgress);
 }
 
 async function launchAndroidFromBin(
@@ -374,7 +261,7 @@ async function launchAndroidFromBin(
         return false;
     }
 
-    terminal.sendText(
+    sendSilent(terminal,
         `echo '▶ Installing APK...' && adb -s ${device.id} install -r "${apkPath}" && ` +
         `echo '▶ Launching...' && adb -s ${device.id} shell monkey -p ${packageId} 1`
     );
@@ -391,20 +278,20 @@ export function openLogViewer(platform: Platform, device: Device, projectPath: s
     if (platform.name === 'iOS') {
         if (device.type === 'physical') {
             // Physical iOS device — use log show via devicectl or os_log
-            terminal.sendText(
+            sendSilent(terminal,
                 `xcrun devicectl device process launch --device ${device.id} ` +
                 `--console ${appName} 2>/dev/null || ` +
                 `echo 'Tip: use Console.app to view logs from physical devices'`
             );
         } else {
-            terminal.sendText(
+            sendSilent(terminal,
                 `xcrun simctl spawn ${device.id} log stream ` +
                 `--level debug --style compact ` +
                 `--predicate 'processImagePath contains "${appName}" AND NOT subsystem BEGINSWITH "com.apple."'`
             );
         }
     } else {
-        terminal.sendText(`adb -s ${device.id} logcat -s dotnet mono-rt Mono`);
+        sendSilent(terminal, `adb -s ${device.id} logcat -s dotnet mono-rt Mono`);
     }
 }
 
@@ -412,20 +299,22 @@ export async function buildOnly(
     projectPath: string,
     platform: Platform,
     config: string
-): Promise<boolean> {
+): Promise<BuildResult> {
     const terminal = getBuildTerminal();
     terminal.show();
 
-    return runBuildCommand(terminal, errorLogFile => {
-        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${msBuildErrorLoggerArg(errorLogFile)}`;
+    return runBuildCommand(terminal, logArgs => {
+        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${logArgs}`;
         return `echo '▶ Pre-building for debug...' && ${buildCmd} && echo '✅ BUILD_DONE'`;
     });
 }
 
 export async function runTests(
     targetPath: string,
-    config: string
-): Promise<boolean> {
+    config: string,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
     const terminal = getBuildTerminal();
     terminal.show();
 
@@ -435,7 +324,9 @@ export async function runTests(
         `echo '▶ Running tests...' && ${testCmd}`,
         1_200_000,
         undefined,
-        showTestFailure
+        showTestFailure,
+        token,
+        onProgress
     );
 }
 
@@ -443,8 +334,10 @@ export async function buildForDebug(
     projectPath: string,
     platform: Platform,
     config: string,
-    deviceType?: 'simulator' | 'physical'
-): Promise<boolean> {
+    deviceType?: 'simulator' | 'physical',
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
     const terminal = getBuildTerminal();
     terminal.show();
 
@@ -453,10 +346,10 @@ export async function buildForDebug(
     // Build with debug flags — MtouchDebug=true enables Mono SDB in iOS apps
     const extraProps = platform.name === 'iOS'
         ? '-p:MtouchDebug=true'
-        : '-p:EmbedAssembliesIntoApk=true';
+        : `-p:EmbedAssembliesIntoApk=true ${androidFastBuildProps(config).join(' ')}`;
 
     const rid = platform.name === 'iOS' && deviceType === 'physical' ? ' -r ios-arm64' : '';
-    return runBuildCommand(terminal, errorLogFile => {
+    return runBuildCommand(terminal, logArgs => {
         const hotReloadProps = [
             shellQuote(`-p:CustomAfterMicrosoftCommonTargets=${hotReloadAgent.targetsPath}`),
             shellQuote(`-p:MauiDeployHotReloadAgentSource=${hotReloadAgent.sourcePath}`),
@@ -464,9 +357,9 @@ export async function buildForDebug(
             '-p:EnableMauiXamlDiagnostics=true',
             '-p:MauiXamlLineInfo=true'
         ].join(' ');
-        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${extraProps}${rid} ${hotReloadProps} ${msBuildErrorLoggerArg(errorLogFile)}`;
+        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${extraProps}${rid} ${hotReloadProps} ${logArgs}`;
         return `echo '▶ Building for debug...' && ${buildCmd} && echo '✅ BUILD_DONE'`;
-    });
+    }, 600_000, token, onProgress);
 }
 
 function createHotReloadAgentFiles(): { sourcePath: string; targetsPath: string } {
@@ -2014,19 +1907,34 @@ internal static class XamlHotReloadAgent
 `;
 }
 
+export interface BuildResult {
+    success: boolean;
+    durationMs: number;
+}
+
 async function runBuildCommand(
     terminal: vscode.Terminal,
-    commandFactory: (errorLogFile: string) => string,
-    timeout = 600_000
-): Promise<boolean> {
+    commandFactory: (logArgs: string) => string,
+    timeout = 600_000,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
     const errorLogFile = tempFilePath('.errors.log');
+    const progressLogFile = tempFilePath('.progress.log');
 
     try { fs.rmSync(errorLogFile, { force: true }); } catch { }
+    try { fs.rmSync(progressLogFile, { force: true }); } catch { }
+
+    const logArgs = [
+        shellQuote(`-flp:logfile=${errorLogFile};errorsonly;verbosity=normal`),
+        shellQuote(`-flp2:logfile=${progressLogFile};verbosity=detailed`)
+    ].join(' ');
 
     try {
-        return await runTerminalCommand(terminal, commandFactory(errorLogFile), timeout, errorLogFile);
+        return await runTerminalCommand(terminal, commandFactory(logArgs), timeout, errorLogFile, showBuildErrors, token, onProgress, progressLogFile);
     } finally {
         try { fs.rmSync(errorLogFile, { force: true }); } catch { }
+        try { fs.rmSync(progressLogFile, { force: true }); } catch { }
     }
 }
 
@@ -2035,16 +1943,27 @@ async function runTerminalCommand(
     command: string,
     timeout = 600_000,
     errorLogFile?: string,
-    onFailure: (output: string, exitCode: number | undefined, command: string) => void = showBuildErrors
-): Promise<boolean> {
+    onFailure: (output: string, exitCode: number | undefined, command: string) => void = showBuildErrors,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    progressLogFile?: string
+): Promise<BuildResult> {
     const exitCodeFile = tempFilePath('.exit');
+    const started = Date.now();
 
     try { fs.rmSync(exitCodeFile, { force: true }); } catch { }
     buildErrorsOutput?.clear();
     lastBuildFailure = undefined;
 
-    terminal.sendText(`${command}; printf '%s' $? > ${shellQuote(exitCodeFile)}`);
-    const exitCode = await waitForExitCodeFile(exitCodeFile, timeout);
+    // Write the command to a temp script so the terminal only echoes
+    // ". /tmp/script.sh" instead of the entire (very long) build command.
+    // The script starts by erasing that echoed line with ANSI escape codes.
+    const scriptFile = tempFilePath('.sh');
+    const exitCapture = `printf '%s' $? > ${shellQuote(exitCodeFile)}`;
+    fs.writeFileSync(scriptFile, `printf '\x1b[A\x1b[2K'\n${command}\n${exitCapture}\n`, 'utf8');
+    terminal.sendText(`. ${shellQuote(scriptFile)}; rm -f ${shellQuote(scriptFile)}`);
+    const exitCode = await waitForExitCodeFile(exitCodeFile, timeout, token, onProgress, progressLogFile);
+    const durationMs = Date.now() - started;
     const output = errorLogFile ? readTextFile(errorLogFile) : '';
 
     try { fs.rmSync(exitCodeFile, { force: true }); } catch { }
@@ -2053,11 +1972,21 @@ async function runTerminalCommand(
         onFailure(output, exitCode, command);
     }
 
-    return exitCode === 0;
+    return { success: exitCode === 0, durationMs };
 }
 
-function msBuildErrorLoggerArg(errorLogFile: string): string {
-    return shellQuote(`-flp:logfile=${errorLogFile};errorsonly;verbosity=normal`);
+/** MSBuild properties that speed up Android Debug builds by disabling
+ *  AOT compilation, IL trimming, and IL linking — these are Release-only
+ *  optimizations but some project templates enable them globally. */
+function androidFastBuildProps(config: string): string[] {
+    if (config.toLowerCase() !== 'debug') { return []; }
+    return [
+        '-p:RunAOTCompilation=false',
+        '-p:PublishTrimmed=false',
+        '-p:AndroidLinkMode=None',
+        '-p:AndroidEnableProfiledAot=false',
+        '-p:AndroidPackageFormat=apk',
+    ];
 }
 
 function tempFilePath(suffix: string): string {
@@ -2261,11 +2190,36 @@ function readTextFile(filePath: string): string {
     try { return fs.readFileSync(filePath, 'utf8'); } catch { return ''; }
 }
 
-async function waitForExitCodeFile(exitCodeFile: string, timeout: number): Promise<number | undefined> {
+async function waitForExitCodeFile(
+    exitCodeFile: string,
+    timeout: number,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    progressLogFile?: string
+): Promise<number | undefined> {
     const started = Date.now();
 
     return new Promise(resolve => {
         const timer = setInterval(() => {
+            if (token?.isCancellationRequested) {
+                clearInterval(timer);
+                resolve(undefined);
+                return;
+            }
+
+            if (onProgress) {
+                let buildPercent = -1;
+                if (progressLogFile) {
+                    try {
+                        const size = fs.statSync(progressLogFile).size;
+                        // Hyperbolic scale driven by detailed MSBuild log file size.
+                        // 150 KB → ~45%, 500 KB → ~69%, 1 MB → ~78%, 2 MB → ~86%
+                        buildPercent = Math.min(90, 90 * size / (size + 200_000));
+                    } catch { buildPercent = 0; }
+                }
+                onProgress(Date.now() - started, buildPercent);
+            }
+
             if (fs.existsSync(exitCodeFile)) {
                 clearInterval(timer);
                 const content = fs.readFileSync(exitCodeFile, 'utf8').trim();
@@ -2285,6 +2239,13 @@ function shellQuote(value: string): string {
     return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
+/** Send a command to the terminal without echoing the command line itself. */
+function sendSilent(terminal: vscode.Terminal, command: string): void {
+    const scriptFile = tempFilePath('.sh');
+    fs.writeFileSync(scriptFile, `printf '\x1b[A\x1b[2K'\n${command}\n`, 'utf8');
+    terminal.sendText(`. ${shellQuote(scriptFile)}; rm -f ${shellQuote(scriptFile)}`);
+}
+
 function shellEnvAssignment(name: string, value: string): string {
     return `${name}=${shellQuote(value)}`;
 }
@@ -2292,7 +2253,5 @@ function shellEnvAssignment(name: string, value: string): string {
 export function disposeTerminals() {
     buildTerminal?.dispose();
     logTerminal?.dispose();
-    stopHotReload();
     buildErrorsOutput?.dispose();
-    hotReloadStatusEmitter.dispose();
 }

@@ -13,6 +13,7 @@ public class LaunchConfig
     public string DeviceType { get; }
     public string ProgramPath { get; }
     public string AppName { get; }
+    public string? ApplicationId { get; }
     public int DebugPort { get; }
 
     public LaunchConfig(Dictionary<string, JToken> properties)
@@ -26,6 +27,7 @@ public class LaunchConfig
         DeviceType = properties.GetValueOrDefault("deviceType")?.Value<string>() ?? "simulator";
         ProgramPath = properties.GetValueOrDefault("programPath")?.Value<string>() ?? "";
         AppName = Path.GetFileNameWithoutExtension(ProjectPath);
+        ApplicationId = properties.GetValueOrDefault("applicationId")?.Value<string>();
         DebugPort = properties.GetValueOrDefault("debugPort")?.Value<int>() ?? GetFreePort();
     }
 

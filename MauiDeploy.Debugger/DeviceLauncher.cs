@@ -141,20 +141,24 @@ public class DeviceLauncher : IDisposable
 
     private void LaunchAndroid(Action<string> onOutput, Action<string> onError)
     {
-        var appName = _config.AppName;
+        var appName = _config.ApplicationId ?? _config.AppName;
 
         // Install APK
         onOutput("Installing APK...");
         RunAndWait("adb", $"-s {_config.DeviceId} install -r \"{_config.ProgramPath}\"", onOutput, onError);
 
-        // Set debug connection property
-        RunAndWait("adb", $"-s {_config.DeviceId} shell setprop debug.mono.connect port={_config.DebugPort}", onOutput, onError);
+        // Reverse-tunnel the debug port: device localhost:PORT → host localhost:PORT
+        // (the debugger is already listening on the host side, so adb forward would
+        // collide; adb reverse creates the listener on the device instead).
+        try { RunAndWait("adb", $"-s {_config.DeviceId} reverse --remove tcp:{_config.DebugPort}", _ => { }, _ => { }); }
+        catch { /* no existing reverse — fine */ }
+        RunAndWait("adb", $"-s {_config.DeviceId} reverse tcp:{_config.DebugPort} tcp:{_config.DebugPort}", onOutput, onError);
 
-        // Forward debug port
-        RunAndWait("adb", $"-s {_config.DeviceId} forward tcp:{_config.DebugPort} tcp:{_config.DebugPort}", onOutput, onError);
-
-        // Set debug-app flag (makes app wait for debugger)
-        RunAndWait("adb", $"-s {_config.DeviceId} shell am set-debug-app {appName}", onOutput, onError);
+        // Tell the Mono runtime to connect back to the debugger.
+        // .NET for Android reads debug.mono.extra for the SDB agent options.
+        var agentArgs = $"--debugger-agent=transport=dt_socket,address=127.0.0.1:{_config.DebugPort},server=n,suspend=n";
+        RunAndWait("adb", $"-s {_config.DeviceId} shell setprop debug.mono.extra \"{agentArgs}\"", onOutput, onError);
+        RunAndWait("adb", $"-s {_config.DeviceId} shell setprop debug.mono.debug 1", onOutput, onError);
 
         // Launch
         onOutput("Launching app...");
@@ -378,10 +382,10 @@ public class DeviceLauncher : IDisposable
         }
         _processes.Clear();
 
-        // Clean up Android port forwarding
+        // Clean up Android reverse tunnel
         if (_config.Platform == "Android")
         {
-            try { RunAndWait("adb", $"-s {_config.DeviceId} forward --remove-all", _ => { }, _ => { }); }
+            try { RunAndWait("adb", $"-s {_config.DeviceId} reverse --remove-all", _ => { }, _ => { }); }
             catch { /* best effort */ }
         }
     }

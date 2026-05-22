@@ -22,7 +22,7 @@ git submodule update --init --recursive
 
 ## Visual Studio Marketplace
 
-The VS Code extension lives in `mauideploy-vscode/` and is configured with publisher id `DIPS`.
+The VS Code extension lives in `mauideploy-vscode/` and is configured with publisher id `VetleFinstad`.
 
 To publish publicly in the VS Code Marketplace:
 
@@ -33,7 +33,7 @@ To publish publicly in the VS Code Marketplace:
 
 ```bash
 cd mauideploy-vscode
-npx @vscode/vsce login DIPS
+npx @vscode/vsce login VetleFinstad
 ```
 
 5. Build and publish the extension:
