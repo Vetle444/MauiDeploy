@@ -2,6 +2,11 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 1.3.1 - 2026-06-24
+
+### Fixed
+- Attached the physical iOS debug launch to the device console so app stdout and stderr are visible while debugging.
+
 ## 1.3.0 - 2026-06-24
 
 ### Added

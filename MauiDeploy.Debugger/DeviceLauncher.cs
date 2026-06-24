@@ -88,11 +88,15 @@ public class DeviceLauncher : IDisposable
             onOutput, onError);
         EnsureIproxyStillRunning(iproxyProcess, "after installing the app");
 
-        // Launch app via devicectl
-        onOutput("Launching app on device...");
-        var launchArgs = $"devicectl device process launch --device {_config.DeviceId} -- {bundleId}";
+        // Launch app via devicectl with the console attached.  devicectl stays
+        // alive until the app exits, so start it as a child process instead of
+        // waiting for it to complete; this lets stdout/stderr flow into VS Code
+        // while the Mono debugger attaches through the USB tunnel.
+        onOutput("Launching app on device with console attached...");
+        var launchArgs = $"devicectl device process launch --console --terminate-existing --device {_config.DeviceId} -- {bundleId}";
         onOutput($"xcrun {launchArgs}");
-        RunAndWait("xcrun", launchArgs, onOutput, onError);
+        var consoleProcess = StartProcess("xcrun", launchArgs, onOutput, onError);
+        _processes.Add(consoleProcess);
         EnsureIproxyStillRunning(iproxyProcess, "after launching the app");
 
         // Brief wait for the app's debug listener to start (it listens on port 10000)
