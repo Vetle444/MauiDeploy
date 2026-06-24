@@ -11,13 +11,13 @@ import {
 } from './devices';
 import { findWorkspaceMauiProjects, findWorkspaceCsprojs, findCsprojsInDir } from './projects';
 import {
-    buildAndDeploy, deployFromBin, buildForDebug, openLogViewer, disposeTerminals,
+    buildAndDeploy, deployFromBin, buildForDebug, disposeTerminals,
     askCopilotToFixLastBuildFailure, runTests,
-    BuildResult
+    BuildResult, DEFAULT_XAML_HOT_RELOAD_PORT
 } from './deployer';
 
 const execFileAsync = promisify(execFile);
-const xamlHotReloadPort = 55337;
+const xamlHotReloadPort = DEFAULT_XAML_HOT_RELOAD_PORT;
 const xamlHotReloadRequestAttempts = 4;
 const xamlHotReloadRequestRetryDelayMs = 700;
 
@@ -33,6 +33,11 @@ interface State {
     recentDevices: RecentDevice[];
 }
 
+interface DeployTarget {
+    platform: Platform;
+    device: Device;
+}
+
 let state: State = { config: 'Debug', recentDevices: [] };
 let ctx: vscode.ExtensionContext;
 let isBuilding = false;
@@ -43,7 +48,7 @@ let devicePollTimer: ReturnType<typeof setInterval> | undefined;
 const DEVICE_POLL_INTERVAL_MS = 60_000;
 let xamlHotReloadWatcher: vscode.FileSystemWatcher | undefined;
 let xamlHotReloadSession: vscode.DebugSession | undefined;
-let xamlHotReloadTunnel: { platform: 'iOS' | 'Android'; deviceId: string; process?: ChildProcess } | undefined;
+let xamlHotReloadTunnel: { platform: 'iOS' | 'Android'; deviceId: string; port: number; process?: ChildProcess } | undefined;
 const xamlHotReloadTimers = new Map<string, NodeJS.Timeout>();
 const xamlHotReloadInFlight = new Set<string>();
 const xamlHotReloadPending = new Map<string, { session: vscode.DebugSession; projectPath: string }>();
@@ -52,13 +57,14 @@ const lastAppliedXamlByFile = new Map<string, string>();
 // ── Status Bar ─────────────────────────────────────────
 
 let sbRun: vscode.StatusBarItem;
+let sbRunMultiple: vscode.StatusBarItem;
 let sbDeployFromBin: vscode.StatusBarItem;
 let sbDebug: vscode.StatusBarItem;
 let sbTests: vscode.StatusBarItem;
 let sbProject: vscode.StatusBarItem;
 let sbConfig: vscode.StatusBarItem;
 let sbDevice: vscode.StatusBarItem;
-let sbLogs: vscode.StatusBarItem;
+
 
 // ── Lifecycle ──────────────────────────────────────────
 
@@ -69,6 +75,7 @@ export function activate(context: vscode.ExtensionContext) {
     createStatusBar(context);
     registerCommands(context);
     registerDebugHotReload(context);
+    registerDebugAdapterFactory(context);
     autoDetectProject();
     startDevicePolling();
     context.subscriptions.push({ dispose: () => { stopDevicePolling(); stopXamlHotReloadWatcher(); disposeTerminals(); } });
@@ -111,6 +118,10 @@ function createStatusBar(context: vscode.ExtensionContext) {
     sbRun.command = 'mauideploy.run';
     context.subscriptions.push(sbRun);
 
+    sbRunMultiple = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100.75);
+    sbRunMultiple.command = 'mauideploy.runMultiple';
+    context.subscriptions.push(sbRunMultiple);
+
     sbDeployFromBin = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100.5);
     sbDeployFromBin.command = 'mauideploy.deployFromBin';
     context.subscriptions.push(sbDeployFromBin);
@@ -135,10 +146,6 @@ function createStatusBar(context: vscode.ExtensionContext) {
     sbDevice.command = 'mauideploy.pickDevice';
     context.subscriptions.push(sbDevice);
 
-    sbLogs = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 96);
-    sbLogs.command = 'mauideploy.openLogs';
-    context.subscriptions.push(sbLogs);
-
     updateStatusBar();
 }
 
@@ -155,6 +162,15 @@ function updateStatusBar() {
         sbRun.tooltip = markdownTooltip(`**$(play) Run** — ${target}\n\n\`${key}\``);
     }
     sbRun.show();
+
+    // ── Run multiple targets button ──
+    if (!isBuilding) {
+        sbRunMultiple.text = '$(run-all)';
+        sbRunMultiple.color = '#89d185';
+        sbRunMultiple.backgroundColor = undefined;
+        sbRunMultiple.tooltip = markdownTooltip('**$(run-all) Run Multiple Targets** — Build & deploy to iOS and Android devices together');
+    }
+    sbRunMultiple.show();
 
     // ── Deploy from bin button ──
     if (!isBuilding) {
@@ -236,12 +252,6 @@ function updateStatusBar() {
     }
     sbDevice.show();
 
-    // ── Logs ──
-    sbLogs.text = '$(output)';
-    sbLogs.color = '#888888';
-    sbLogs.tooltip = markdownTooltip('**$(output) Logs** — Open device log viewer');
-    sbLogs.show();
-
     vscode.commands.executeCommand('setContext', 'mauideploy.ready',
         !!state.projectPath && !!state.deviceId);
 }
@@ -257,20 +267,49 @@ function formatElapsed(ms: number): string {
     return `${minutes}m ${seconds % 60}s`;
 }
 
-/** Creates a progress callback that updates a status bar item with build progress.
- *  Uses the MAX of a time-based asymptotic curve and real MSBuild log
- *  file size, so the progress always fills smoothly and accelerates when
- *  real build data is available. */
+const progressCeilingPercent = 88;
+const progressLogCeilingPercent = 82;
+
+function createProgressModel() {
+    let displayedPercent = 0;
+    let lastUpdatedAt = Date.now();
+
+    return {
+        next(elapsedMs: number, buildPercent: number): number {
+            const targetPercent = estimateProgressTarget(elapsedMs, buildPercent);
+            const now = Date.now();
+            const deltaSeconds = Math.max(0.25, (now - lastUpdatedAt) / 1000);
+            lastUpdatedAt = now;
+
+            if (targetPercent <= displayedPercent) {
+                return displayedPercent;
+            }
+
+            const maxPercentPerSecond = displayedPercent < 70 ? 12 : 4;
+            const maxStep = Math.max(0.75, deltaSeconds * maxPercentPerSecond);
+            displayedPercent = Math.min(targetPercent, displayedPercent + maxStep);
+            return displayedPercent;
+        }
+    };
+}
+
+function estimateProgressTarget(elapsedMs: number, buildPercent: number): number {
+    const elapsedSeconds = elapsedMs / 1000;
+    const timeBased = progressCeilingPercent * (1 - Math.exp(-elapsedSeconds / 65));
+    const logBased = buildPercent >= 0 ? Math.min(progressLogCeilingPercent, buildPercent) : 0;
+    return Math.min(progressCeilingPercent, Math.max(timeBased, logBased));
+}
+
+/** Creates a progress callback that updates a status bar item with build progress. */
 function createStatusBarReporter(item: vscode.StatusBarItem, label: string) {
-    let lastPercent = 0;
+    const model = createProgressModel();
+    let lastShownPercent = -1;
     return (elapsedMs: number, buildPercent: number) => {
-        const timeBased = Math.min(90, 90 * (1 - Math.exp(-elapsedMs / 1000 / 40)));
-        const targetPercent = buildPercent > timeBased ? buildPercent : timeBased;
-        const pct = Math.round(targetPercent);
-        if (targetPercent - lastPercent >= 0.5 || targetPercent === lastPercent) {
+        const pct = Math.round(model.next(elapsedMs, buildPercent));
+        if (pct !== lastShownPercent) {
             item.text = `$(sync~spin) ${pct}%`;
             item.tooltip = `${label} — ${formatElapsed(elapsedMs)}`;
-            lastPercent = targetPercent;
+            lastShownPercent = pct;
         }
     };
 }
@@ -373,16 +412,16 @@ async function ensureToolsAvailable(tools: ToolRequirement[]): Promise<boolean> 
     );
 }
 
-function toolsForCurrentTarget(): ToolRequirement[] {
+function toolsForTarget(platform: 'iOS' | 'Android' | undefined, deviceType?: 'simulator' | 'physical'): ToolRequirement[] {
     const tools: ToolRequirement[] = [];
-    if (state.devicePlatform === 'iOS' && state.deviceType === 'physical') {
+    if (platform === 'iOS' && deviceType === 'physical') {
         tools.push({
             command: 'iproxy',
             brewPackage: 'libimobiledevice',
             reason: 'physical iOS USB tunnel for SDB + XAML Hot Reload',
         });
     }
-    if (state.devicePlatform === 'Android') {
+    if (platform === 'Android') {
         tools.push({
             command: 'adb',
             brewPackage: 'android-platform-tools',
@@ -392,20 +431,68 @@ function toolsForCurrentTarget(): ToolRequirement[] {
     return tools;
 }
 
+function toolsForCurrentTarget(): ToolRequirement[] {
+    return toolsForTarget(state.devicePlatform, state.deviceType);
+}
+
+function toolsForDeployTargets(targets: DeployTarget[]): ToolRequirement[] {
+    const byCommand = new Map<string, ToolRequirement>();
+    for (const target of targets) {
+        for (const tool of toolsForTarget(target.device.platform, target.device.type)) {
+            byCommand.set(tool.command, tool);
+        }
+    }
+    return [...byCommand.values()];
+}
+
 // ── Commands ───────────────────────────────────────────
 
 function registerCommands(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('mauideploy.run', cmdRun),
+        vscode.commands.registerCommand('mauideploy.runMultiple', cmdRunMultiple),
         vscode.commands.registerCommand('mauideploy.deployFromBin', cmdDeployFromBin),
         vscode.commands.registerCommand('mauideploy.debug', cmdDebug),
         vscode.commands.registerCommand('mauideploy.runTests', cmdRunTests),
         vscode.commands.registerCommand('mauideploy.pickProject', cmdPickProject),
         vscode.commands.registerCommand('mauideploy.toggleConfig', cmdToggleConfig),
         vscode.commands.registerCommand('mauideploy.pickDevice', cmdPickDevice),
-        vscode.commands.registerCommand('mauideploy.openLogs', cmdOpenLogs),
         vscode.commands.registerCommand('mauideploy.fixBuildErrorWithCopilot', askCopilotToFixLastBuildFailure),
+        vscode.commands.registerCommand('mauideploy.cleanBinObj', cmdCleanBinObj),
     );
+}
+
+// ── Debug Adapter Factory ─────────────────────────────
+
+function registerDebugAdapterFactory(context: vscode.ExtensionContext) {
+    context.subscriptions.push(
+        vscode.debug.registerDebugAdapterDescriptorFactory('mauideploy', {
+            createDebugAdapterDescriptor(_session) {
+                const dll = path.join(context.extensionPath, 'out', 'debugger', 'MauiDeploy.Debugger.dll');
+                const dotnetPath = findDotnet();
+                const logMsg = `[MauiDeploy] Launching debug adapter: ${dotnetPath} ${dll}\n` +
+                    `  DLL exists: ${fs.existsSync(dll)}\n` +
+                    `  dotnet exists: ${fs.existsSync(dotnetPath)}\n`;
+                fs.appendFileSync('/tmp/mauideploy-debug.log', logMsg);
+                return new vscode.DebugAdapterExecutable(dotnetPath, [dll]);
+            }
+        })
+    );
+}
+
+function findDotnet(): string {
+    // VS Code may not have the same PATH as the user's shell.
+    // Check well-known locations first.
+    const candidates = [
+        '/usr/local/share/dotnet/dotnet',
+        '/opt/homebrew/bin/dotnet',
+        '/usr/local/bin/dotnet',
+        '/usr/bin/dotnet',
+    ];
+    for (const c of candidates) {
+        if (fs.existsSync(c)) { return c; }
+    }
+    return 'dotnet'; // fallback to PATH
 }
 
 // ── Debug XAML Hot Reload ─────────────────────────────
@@ -515,10 +602,11 @@ async function sendXamlHotReload(session: vscode.DebugSession, projectPath: stri
 
     const base64Xaml = Buffer.from(xaml, 'utf8').toString('base64');
     const fileName = path.basename(filePath);
+    const port = getXamlHotReloadPort(session);
     debugLog(`Hot Reload: sending ${fileName} (${resourcePath}, ${xaml.length} chars)`);
 
     try {
-        const response = await postXamlHotReloadWithRetry('/apply', {
+        const response = await postXamlHotReloadWithRetry(port, '/apply', {
             resourcePath,
             base64Xaml
         });
@@ -591,10 +679,14 @@ async function startXamlHotReloadTunnel(session: vscode.DebugSession) {
     const platform = session.configuration.platform;
     const deviceType = session.configuration.deviceType;
     const deviceId = session.configuration.deviceId;
+    const port = getXamlHotReloadPort(session);
 
     if (typeof deviceId !== 'string') {
         return;
     }
+
+    const log = getTunnelLogChannel();
+    await clearXamlHotReloadPort(port, log);
 
     if (platform === 'iOS' && deviceType === 'physical') {
         if (!await ensureToolsAvailable([{
@@ -604,9 +696,9 @@ async function startXamlHotReloadTunnel(session: vscode.DebugSession) {
         }])) {
             return;
         }
-        const log = getTunnelLogChannel();
-        log.appendLine(`[tunnel] starting: iproxy ${xamlHotReloadPort}:${xamlHotReloadPort} -u ${deviceId}`);
-        const process = spawn('iproxy', [`${xamlHotReloadPort}:${xamlHotReloadPort}`, '-u', deviceId]);
+
+        log.appendLine(`[tunnel] starting: iproxy ${port}:${port} -u ${deviceId}`);
+        const process = spawn('iproxy', [`${port}:${port}`, '-u', deviceId]);
         process.stdout?.on('data', (chunk: Buffer) => log.append(`[iproxy] ${chunk.toString()}`));
         process.stderr?.on('data', (chunk: Buffer) => log.append(`[iproxy stderr] ${chunk.toString()}`));
         process.on('error', error => {
@@ -616,7 +708,7 @@ async function startXamlHotReloadTunnel(session: vscode.DebugSession) {
         process.on('exit', (code, signal) => {
             log.appendLine(`[tunnel] iproxy exited (code=${code}, signal=${signal})`);
         });
-        xamlHotReloadTunnel = { platform, deviceId, process };
+        xamlHotReloadTunnel = { platform, deviceId, port, process };
         return;
     }
 
@@ -628,10 +720,54 @@ async function startXamlHotReloadTunnel(session: vscode.DebugSession) {
         }])) {
             return;
         }
-        xamlHotReloadTunnel = { platform, deviceId };
-        void execFileAsync('adb', ['-s', deviceId, 'forward', `tcp:${xamlHotReloadPort}`, `tcp:${xamlHotReloadPort}`])
-            .catch(error => vscode.window.showWarningMessage(`MAUI XAML Hot Reload adb forward failed: ${error.message}`));
+        xamlHotReloadTunnel = { platform, deviceId, port };
+        try {
+            log.appendLine(`[tunnel] starting: adb -s ${deviceId} forward tcp:${port} tcp:${port}`);
+            await execFileAsync('adb', ['-s', deviceId, 'forward', `tcp:${port}`, `tcp:${port}`]);
+        } catch (error) {
+            vscode.window.showWarningMessage(`MAUI XAML Hot Reload adb forward failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }
+}
+
+function getXamlHotReloadPort(session: vscode.DebugSession): number {
+    const configured = session.configuration.xamlHotReloadPort;
+    return typeof configured === 'number' && configured > 0 ? configured : xamlHotReloadPort;
+}
+
+async function clearXamlHotReloadPort(port: number, log: vscode.OutputChannel) {
+    await clearAndroidForwardsForPort(port, log);
+    await clearIproxyProcessesForPort(port, log);
+}
+
+async function clearAndroidForwardsForPort(port: number, log: vscode.OutputChannel) {
+    try {
+        const { stdout } = await execFileAsync('adb', ['forward', '--list']);
+        const staleForwards = stdout
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(line => line.length > 0)
+            .map(line => line.split(/\s+/))
+            .filter(parts => parts.length >= 3 && parts[1] === `tcp:${port}`);
+
+        for (const forward of staleForwards) {
+            const serial = forward[0];
+            log.appendLine(`[tunnel] removing stale adb forward on ${serial}: tcp:${port}`);
+            await execFileAsync('adb', ['-s', serial, 'forward', '--remove', `tcp:${port}`]).catch(() => { });
+        }
+    } catch { }
+}
+
+async function clearIproxyProcessesForPort(port: number, log: vscode.OutputChannel) {
+    try {
+        const { stdout } = await execFileAsync('pgrep', ['-f', `iproxy.*${port}`]);
+        const pids = stdout.trim().split('\n').filter(Boolean);
+        if (pids.length > 0) {
+            log.appendLine(`[tunnel] killing ${pids.length} orphaned iproxy process(es): ${pids.join(', ')}`);
+            await execFileAsync('kill', pids).catch(() => { });
+            await delay(300);
+        }
+    } catch { }
 }
 
 let tunnelLogChannel: vscode.OutputChannel | undefined;
@@ -649,21 +785,21 @@ function stopXamlHotReloadTunnel() {
     tunnel?.process?.kill();
 
     if (tunnel?.platform === 'Android') {
-        void execFileAsync('adb', ['-s', tunnel.deviceId, 'forward', '--remove', `tcp:${xamlHotReloadPort}`]).catch(() => { });
+        void execFileAsync('adb', ['-s', tunnel.deviceId, 'forward', '--remove', `tcp:${tunnel.port}`]).catch(() => { });
     }
 }
 
-async function postXamlHotReload(endpoint: '/apply' | '/status', body: Record<string, string>): Promise<{ status: string; details: string }> {
-    const details = await postText(endpoint, JSON.stringify(body));
+async function postXamlHotReload(port: number, endpoint: '/apply' | '/status', body: Record<string, string>): Promise<{ status: string; details: string }> {
+    const details = await postText(port, endpoint, JSON.stringify(body));
     return { status: 'ok', details };
 }
 
-async function postXamlHotReloadWithRetry(endpoint: '/apply' | '/status', body: Record<string, string>): Promise<{ status: string; details: string }> {
+async function postXamlHotReloadWithRetry(port: number, endpoint: '/apply' | '/status', body: Record<string, string>): Promise<{ status: string; details: string }> {
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= xamlHotReloadRequestAttempts; attempt++) {
         try {
-            return await postXamlHotReload(endpoint, body);
+            return await postXamlHotReload(port, endpoint, body);
         } catch (error) {
             lastError = error;
             if (!isTransientXamlHotReloadConnectionError(error) || attempt === xamlHotReloadRequestAttempts) {
@@ -690,11 +826,11 @@ function delay(milliseconds: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
-function postText(endpoint: string, body: string): Promise<string> {
+function postText(port: number, endpoint: string, body: string): Promise<string> {
     return new Promise((resolve, reject) => {
         const request = http.request({
             hostname: '127.0.0.1',
-            port: xamlHotReloadPort,
+            port,
             path: endpoint,
             method: 'POST',
             timeout: 30000,
@@ -810,17 +946,14 @@ async function cmdRun() {
             createStatusBarReporter(sbRun, `Building ${projectName}`)
         );
 
-        if (result.success) {
+        if (result.cancelled) {
+            updateStatusBar();
+        } else if (result.success) {
             const duration = formatDuration(result.durationMs);
             sbRun.text = '$(check)';
             sbRun.color = '#89d185';
             sbRun.tooltip = `Deployed to ${state.deviceName} in ${duration}`;
-            vscode.window.showInformationMessage(
-                `Deployed to ${state.deviceName} in ${duration}`,
-                'Open Logs'
-            ).then(choice => {
-                if (choice === 'Open Logs') { cmdOpenLogs(); }
-            });
+            vscode.window.showInformationMessage(`Deployed to ${state.deviceName} in ${duration}`);
             setTimeout(() => updateStatusBar(), 3000);
         } else {
             flashError(sbRun);
@@ -829,6 +962,264 @@ async function cmdRun() {
         isBuilding = false;
         if (sbRun.text === '$(sync~spin)') { updateStatusBar(); }
     }
+}
+
+async function cmdRunMultiple() {
+    if (isBuilding) { return; }
+
+    if (!state.projectPath || !fs.existsSync(state.projectPath)) {
+        if (!await cmdPickProject()) { return; }
+    }
+
+    const platforms = detectPlatforms(state.projectPath!);
+    if (!platforms.some(p => p.name === 'iOS') || !platforms.some(p => p.name === 'Android')) {
+        vscode.window.showErrorMessage('Project must target both iOS and Android to run both at the same time.');
+        return;
+    }
+
+    const targets = await pickDeployTargets(platforms);
+    if (!targets) { return; }
+
+    const selectedPlatforms = new Set(targets.map(t => t.platform.name));
+    if (!selectedPlatforms.has('iOS') || !selectedPlatforms.has('Android')) {
+        vscode.window.showWarningMessage('Pick at least one iOS target and one Android target.');
+        return;
+    }
+
+    if (!await ensureToolsAvailable(toolsForDeployTargets(targets))) { return; }
+
+    isBuilding = true;
+    sbRunMultiple.text = '$(sync~spin)';
+    sbRunMultiple.color = '#dcdcaa';
+    sbRunMultiple.tooltip = 'Preparing targets…';
+
+    const started = Date.now();
+
+    try {
+        if (!await bootDeployTargets(targets, sbRunMultiple)) { return; }
+
+        const projectName = path.basename(state.projectPath!, '.csproj');
+        const progress = createMultiRunProgress(sbRunMultiple, `Building ${projectName}`, targets);
+        sbRunMultiple.tooltip = `Building & deploying to ${formatDeployTargets(targets)}…`;
+
+        const runs = targets.map(async target => {
+            const result = await buildAndDeploy(
+                state.projectPath!, target.platform, target.device, state.config,
+                undefined,
+                progress.reporterFor(target),
+                deployTargetTerminalName(target)
+            );
+            progress.complete(target, result.success);
+            return { target, result };
+        });
+
+        const settled = await Promise.allSettled(runs);
+        const failed = settled.filter(entry =>
+            entry.status === 'rejected' || (!entry.value.result.success && !entry.value.result.cancelled)
+        );
+        const cancelled = settled.filter((entry): entry is PromiseFulfilledResult<{ target: DeployTarget; result: BuildResult; }> =>
+            entry.status === 'fulfilled' && entry.value.result.cancelled === true
+        );
+
+        if (failed.length === 0 && cancelled.length === 0) {
+            const duration = formatDuration(Date.now() - started);
+            sbRunMultiple.text = '$(check)';
+            sbRunMultiple.color = '#89d185';
+            sbRunMultiple.tooltip = `Deployed to ${formatDeployTargets(targets)} in ${duration}`;
+            vscode.window.showInformationMessage(`Deployed to ${formatDeployTargets(targets)} in ${duration}`);
+            setTimeout(() => updateStatusBar(), 3000);
+        } else if (failed.length > 0) {
+            flashError(sbRunMultiple);
+            vscode.window.showErrorMessage(`Failed to deploy to ${formatFailedDeployTargets(failed)}. Check the target build terminals.`);
+        } else {
+            updateStatusBar();
+            vscode.window.showWarningMessage(`Run cancelled for ${formatDeployTargets(cancelled.map(entry => entry.value.target))}.`);
+        }
+    } finally {
+        isBuilding = false;
+        if (sbRunMultiple.text.startsWith('$(sync~spin)')) { updateStatusBar(); }
+    }
+}
+
+async function pickDeployTargets(platforms: Platform[]): Promise<DeployTarget[] | undefined> {
+    const devices = await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: 'Detecting iOS and Android targets…',
+            cancellable: false,
+        },
+        async () => detectAllDevices(platforms)
+    );
+    cachedDevices = devices;
+
+    if (devices.length === 0) {
+        vscode.window.showErrorMessage('No iOS or Android devices found. Start a simulator/emulator or connect a device.');
+        return undefined;
+    }
+
+    const items = buildDeployTargetItems(devices, platforms);
+    const picked = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        title: 'Select Run Targets',
+        placeHolder: 'Pick at least one iOS target and one Android target',
+        matchOnDescription: true,
+        matchOnDetail: true,
+    });
+
+    if (!picked) { return undefined; }
+
+    const targets = picked
+        .map(item => item.target)
+        .filter((target): target is DeployTarget => !!target);
+
+    if (targets.length < 2) {
+        vscode.window.showWarningMessage('Pick at least two targets.');
+        return undefined;
+    }
+
+    return targets;
+}
+
+interface DeployTargetItem extends vscode.QuickPickItem {
+    target?: DeployTarget;
+}
+
+function buildDeployTargetItems(devices: Device[], platforms: Platform[]): DeployTargetItem[] {
+    const items: DeployTargetItem[] = [];
+    const platformByName = new Map(platforms.map(platform => [platform.name, platform]));
+    const pickedIds = getDefaultDeployTargetIds(devices);
+
+    const addDevice = (device: Device) => {
+        const platform = platformByName.get(device.platform);
+        if (!platform) { return; }
+        const { icon, stateLabel } = deviceVisuals(device);
+        const picked = pickedIds.has(device.id);
+        items.push({
+            label: `${picked ? '$(check)' : icon}  ${device.name}`,
+            description: device.platform === 'Android' ? device.id : device.runtime,
+            detail: `${platform.display} — ${stateLabel}`,
+            picked,
+            target: { platform, device }
+        });
+    };
+
+    const iosPhysical = devices.filter(d => d.platform === 'iOS' && d.type === 'physical');
+    if (iosPhysical.length > 0) {
+        items.push({ label: 'iOS Devices', kind: vscode.QuickPickItemKind.Separator });
+        iosPhysical.forEach(addDevice);
+    }
+
+    const iosSimulators = devices.filter(d => d.platform === 'iOS' && d.type === 'simulator');
+    if (iosSimulators.length > 0) {
+        items.push({ label: 'iOS Simulators', kind: vscode.QuickPickItemKind.Separator });
+        iosSimulators.forEach(addDevice);
+    }
+
+    const android = devices.filter(d => d.platform === 'Android');
+    if (android.length > 0) {
+        items.push({ label: 'Android Devices', kind: vscode.QuickPickItemKind.Separator });
+        android.forEach(addDevice);
+    }
+
+    return items;
+}
+
+function getDefaultDeployTargetIds(devices: Device[]): Set<string> {
+    const ids = new Set<string>();
+    if (state.deviceId && devices.some(device => device.id === state.deviceId)) {
+        ids.add(state.deviceId);
+    }
+
+    for (const platform of ['iOS', 'Android'] as const) {
+        if ([...ids].some(id => devices.some(device => device.id === id && device.platform === platform))) {
+            continue;
+        }
+
+        const recent = state.recentDevices.find(recentDevice =>
+            recentDevice.platform === platform && devices.some(device => device.id === recentDevice.id)
+        );
+        if (recent) {
+            ids.add(recent.id);
+            continue;
+        }
+
+        const preferred = devices.find(device => device.platform === platform && device.state === 'Booted')
+            ?? devices.find(device => device.platform === platform && device.type === 'physical')
+            ?? devices.find(device => device.platform === platform);
+        if (preferred) { ids.add(preferred.id); }
+    }
+
+    return ids;
+}
+
+async function bootDeployTargets(targets: DeployTarget[], item: vscode.StatusBarItem): Promise<boolean> {
+    for (const target of targets) {
+        const device = target.device;
+        if (device.platform !== 'iOS' || device.type === 'physical' || device.state !== 'Shutdown') {
+            continue;
+        }
+
+        item.text = '$(sync~spin)';
+        item.tooltip = `Booting ${device.name}…`;
+        const booted = await bootSimulator(device.id);
+        if (!booted) {
+            vscode.window.showErrorMessage(`Failed to boot ${device.name}.`);
+            return false;
+        }
+        device.state = 'Booted';
+    }
+    return true;
+}
+
+function createMultiRunProgress(item: vscode.StatusBarItem, label: string, targets: DeployTarget[]) {
+    const progressByTarget = new Map(targets.map(target => [deployTargetKey(target), 0]));
+    const modelsByTarget = new Map(targets.map(target => [deployTargetKey(target), createProgressModel()]));
+    const started = Date.now();
+
+    const update = () => {
+        const total = [...progressByTarget.values()].reduce((sum, value) => sum + value, 0);
+        const percent = Math.round(total / targets.length);
+        item.text = `$(sync~spin) ${percent}%`;
+        item.tooltip = `${label} — ${formatElapsed(Date.now() - started)}`;
+    };
+
+    return {
+        reporterFor(target: DeployTarget) {
+            const key = deployTargetKey(target);
+            return (elapsedMs: number, buildPercent: number) => {
+                const model = modelsByTarget.get(key) ?? createProgressModel();
+                progressByTarget.set(key, model.next(elapsedMs, buildPercent));
+                update();
+            };
+        },
+        complete(target: DeployTarget, success: boolean) {
+            const key = deployTargetKey(target);
+            progressByTarget.set(key, success ? 100 : progressByTarget.get(key) ?? 0);
+            update();
+        }
+    };
+}
+
+function deployTargetKey(target: DeployTarget): string {
+    return `${target.platform.name}:${target.device.id}`;
+}
+
+function deployTargetTerminalName(target: DeployTarget): string {
+    const id = target.device.id.length > 8 ? target.device.id.slice(0, 8) : target.device.id;
+    return `MAUI Deploy — ${target.platform.name} ${target.device.name} (${id})`;
+}
+
+function formatDeployTargets(targets: DeployTarget[]): string {
+    return targets.map(target => `${target.device.name} (${target.platform.name})`).join(', ');
+}
+
+function formatFailedDeployTargets(failed: PromiseSettledResult<{ target: DeployTarget; result: BuildResult; }>[]): string {
+    return failed.map(entry => {
+        if (entry.status === 'fulfilled') {
+            return `${entry.value.target.device.name} (${entry.value.target.platform.name})`;
+        }
+        return 'one target';
+    }).join(', ');
 }
 
 // ── Deploy from Bin ───────────────────────────────────
@@ -892,12 +1283,7 @@ async function cmdDeployFromBin() {
             sbDeployFromBin.text = '$(check)';
             sbDeployFromBin.color = '#89d185';
             sbDeployFromBin.tooltip = `Deployed from bin to ${state.deviceName}`;
-            vscode.window.showInformationMessage(
-                `Deployed from bin to ${state.deviceName}`,
-                'Open Logs'
-            ).then(choice => {
-                if (choice === 'Open Logs') { cmdOpenLogs(); }
-            });
+            vscode.window.showInformationMessage(`Deployed from bin to ${state.deviceName}`);
             setTimeout(() => updateStatusBar(), 3000);
         }
     } finally {
@@ -970,11 +1356,17 @@ async function cmdDebug() {
     try {
         // Build with debug flags (MtouchDebug=true for iOS)
         const projectName = path.basename(state.projectPath!, '.csproj');
+        const hotReloadPort = xamlHotReloadPort;
         const buildResult = await buildForDebug(
             state.projectPath!, platform, state.config, state.deviceType,
             undefined,
-            createStatusBarReporter(sbDebug, `Building ${projectName} for debug`)
+            createStatusBarReporter(sbDebug, `Building ${projectName} for debug`),
+            hotReloadPort
         );
+        if (buildResult.cancelled) {
+            updateStatusBar();
+            return;
+        }
         if (!buildResult.success) {
             flashError(sbDebug);
             return;
@@ -982,7 +1374,7 @@ async function cmdDebug() {
 
         // Find the built app path
         const programPath = state.devicePlatform === 'iOS'
-            ? findIosAppBundle(state.projectPath!, platform.framework, state.config)
+            ? findIosAppBundle(state.projectPath!, platform.framework, state.config, state.deviceType)
             : findAndroidApk(state.projectPath!, platform.framework, state.config);
 
         if (!programPath) {
@@ -1005,6 +1397,7 @@ async function cmdDebug() {
             deviceName: state.deviceName!,
             deviceType: state.deviceType || 'simulator',
             programPath: programPath,
+            xamlHotReloadPort: hotReloadPort,
             applicationId: state.devicePlatform === 'Android'
                 ? getAndroidPackageId(state.projectPath!) : undefined,
         };
@@ -1016,11 +1409,55 @@ async function cmdDebug() {
             setTimeout(() => updateStatusBar(), 3000);
         } else {
             vscode.window.showErrorMessage('Failed to start debug session.');
+            flashError(sbDebug);
         }
     } finally {
         isBuilding = false;
-        if (sbDebug.text === '$(sync~spin)') { updateStatusBar(); }
+        updateStatusBar();
     }
+}
+
+// ── Clean bin/obj ─────────────────────────────────────
+
+async function cmdCleanBinObj() {
+    if (!state.projectPath) {
+        vscode.window.showWarningMessage('No project selected.');
+        return;
+    }
+
+    const projectDir = path.dirname(state.projectPath);
+    const solutionRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+    // Collect all bin/obj dirs: project dir + solution root (if different)
+    const dirs: string[] = [];
+    for (const base of [projectDir, solutionRoot]) {
+        if (!base) { continue; }
+        for (const name of ['bin', 'obj']) {
+            const d = path.join(base, name);
+            if (fs.existsSync(d)) { dirs.push(d); }
+        }
+    }
+
+    if (dirs.length === 0) {
+        vscode.window.showInformationMessage('No bin/obj directories found.');
+        return;
+    }
+
+    const labels = dirs.map(d => path.relative(solutionRoot || projectDir, d));
+    const answer = await vscode.window.showWarningMessage(
+        `Delete ${labels.join(', ')}?`, { modal: true }, 'Delete'
+    );
+    if (answer !== 'Delete') { return; }
+
+    for (const d of dirs) {
+        try {
+            fs.rmSync(d, { recursive: true, force: true });
+        } catch (e: any) {
+            vscode.window.showErrorMessage(`Failed to delete ${d}: ${e.message}`);
+        }
+    }
+
+    vscode.window.showInformationMessage(`Deleted: ${labels.join(', ')}`);
 }
 
 // ── Tests ─────────────────────────────────────────────
@@ -1042,7 +1479,9 @@ async function cmdRunTests() {
             testProject.projectPath, testProject.config, undefined,
             createStatusBarReporter(sbTests, `Running tests — ${testName}`)
         );
-        if (result.success) {
+        if (result.cancelled) {
+            updateStatusBar();
+        } else if (result.success) {
             const duration = formatDuration(result.durationMs);
             sbTests.text = '$(check)';
             sbTests.color = '#89d185';
@@ -1497,26 +1936,6 @@ function setDevice(device: Device) {
 
     saveState();
     updateStatusBar();
-}
-
-// ── Logs ───────────────────────────────────────────────
-
-function cmdOpenLogs() {
-    if (!state.projectPath || !state.deviceId || !state.devicePlatform) {
-        vscode.window.showWarningMessage('Run or deploy first to set up logging.');
-        return;
-    }
-    const platforms = detectPlatforms(state.projectPath);
-    const platform = platforms.find(p => p.name === state.devicePlatform);
-    if (!platform) { return; }
-
-    const device: Device = {
-        id: state.deviceId, name: state.deviceName || '',
-        platform: state.devicePlatform, state: 'Booted',
-        type: state.deviceType || 'simulator',
-        display: state.deviceName || ''
-    };
-    openLogViewer(platform, device, state.projectPath);
 }
 
 // ── Auto-detection ─────────────────────────────────────

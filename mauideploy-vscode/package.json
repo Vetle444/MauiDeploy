@@ -2,7 +2,7 @@
   "name": "maui-deploy",
   "displayName": "MauiDeploy",
   "description": "Rider-like toolbar for building, deploying, and debugging with Hot-Reload in .NET MAUI apps",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "author": "FinstadProductions",
   "publisher": "FinstadProductions",
   "license": "MIT",
@@ -31,6 +31,7 @@
   ],
   "icon": "icon.png",
   "activationEvents": [
+    "onDebug",
     "workspaceContains:**/*.csproj"
   ],
   "main": "./out/extension.js",
@@ -39,8 +40,8 @@
       {
         "type": "mauideploy",
         "label": "MAUI Deploy",
-        "program": "./out/debugger/MauiDeploy.Debugger.dll",
         "runtime": "dotnet",
+        "program": "./out/debugger/MauiDeploy.Debugger.dll",
         "languages": [
           "csharp"
         ],
@@ -70,6 +71,9 @@
               },
               "debugPort": {
                 "type": "number"
+              },
+              "xamlHotReloadPort": {
+                "type": "number"
               }
             }
           }
@@ -86,6 +90,11 @@
         "command": "mauideploy.run",
         "title": "MAUI Deploy: Run",
         "icon": "$(play)"
+      },
+      {
+        "command": "mauideploy.runMultiple",
+        "title": "MAUI Deploy: Run Multiple Targets",
+        "icon": "$(run-all)"
       },
       {
         "command": "mauideploy.deployFromBin",
@@ -118,14 +127,14 @@
         "icon": "$(device-mobile)"
       },
       {
-        "command": "mauideploy.openLogs",
-        "title": "MAUI Deploy: Open Logs",
-        "icon": "$(output)"
-      },
-      {
         "command": "mauideploy.fixBuildErrorWithCopilot",
         "title": "MAUI Deploy: Ask Copilot to Fix Build Error",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "mauideploy.cleanBinObj",
+        "title": "MAUI Deploy: Clean bin/obj",
+        "icon": "$(trash)"
       }
     ],
     "keybindings": [

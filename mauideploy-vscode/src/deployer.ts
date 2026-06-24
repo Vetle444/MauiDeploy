@@ -4,7 +4,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { Platform, Device, findIosAppBundle, findAndroidApk, getAndroidPackageId, getBundleId } from './devices';
 
-let buildTerminal: vscode.Terminal | undefined;
+export const DEFAULT_XAML_HOT_RELOAD_PORT = 55438;
+
+const defaultBuildTerminalName = 'MAUI Deploy — Build';
+const buildTerminals = new Map<string, vscode.Terminal>();
 let logTerminal: vscode.Terminal | undefined;
 let buildErrorsOutput: vscode.OutputChannel | undefined;
 
@@ -18,17 +21,20 @@ interface BuildFailureContext {
 
 let lastBuildFailure: BuildFailureContext | undefined;
 
-function getBuildTerminal(fresh = true): vscode.Terminal {
-    if (fresh && buildTerminal && !buildTerminal.exitStatus) {
-        buildTerminal.dispose();
-        buildTerminal = undefined;
+function getBuildTerminal(fresh = true, name = defaultBuildTerminalName): vscode.Terminal {
+    const existing = buildTerminals.get(name);
+    if (fresh && existing && !existing.exitStatus) {
+        existing.dispose();
+        buildTerminals.delete(name);
     }
-    if (buildTerminal && !buildTerminal.exitStatus) { return buildTerminal; }
-    buildTerminal = vscode.window.createTerminal({
-        name: 'MAUI Deploy — Build',
+    const current = buildTerminals.get(name);
+    if (current && !current.exitStatus) { return current; }
+    const terminal = vscode.window.createTerminal({
+        name,
         iconPath: new vscode.ThemeIcon('rocket')
     });
-    return buildTerminal;
+    buildTerminals.set(name, terminal);
+    return terminal;
 }
 
 function getLogTerminal(): vscode.Terminal {
@@ -51,28 +57,30 @@ export async function buildAndDeploy(
     device: Device,
     config: string,
     token?: vscode.CancellationToken,
-    onProgress?: (elapsedMs: number, buildPercent: number) => void
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    terminalName?: string
 ): Promise<BuildResult> {
     if (platform.name === 'iOS') {
         return device.type === 'physical'
-            ? buildAndDeployIosDevice(projectPath, platform, device, config, token, onProgress)
-            : buildAndDeployIos(projectPath, platform, device, config, token, onProgress);
+            ? buildAndDeployIosDevice(projectPath, platform, device, config, token, onProgress, terminalName)
+            : buildAndDeployIos(projectPath, platform, device, config, token, onProgress, terminalName);
     }
-    return buildAndDeployAndroid(projectPath, platform, device, config, token, onProgress);
+    return buildAndDeployAndroid(projectPath, platform, device, config, token, onProgress, terminalName);
 }
 
 export async function deployFromBin(
     projectPath: string,
     platform: Platform,
     device: Device,
-    config: string
+    config: string,
+    terminalName?: string
 ): Promise<boolean> {
     if (platform.name === 'iOS') {
         return device.type === 'physical'
-            ? launchIosDeviceFromBin(projectPath, platform, device, config)
-            : launchIosSimulatorFromBin(projectPath, platform, device, config);
+            ? launchIosDeviceFromBin(projectPath, platform, device, config, terminalName)
+            : launchIosSimulatorFromBin(projectPath, platform, device, config, terminalName);
     }
-    return launchAndroidFromBin(projectPath, platform, device, config);
+    return launchAndroidFromBin(projectPath, platform, device, config, terminalName);
 }
 
 async function buildAndDeployIos(
@@ -81,20 +89,23 @@ async function buildAndDeployIos(
     device: Device,
     config: string,
     token?: vscode.CancellationToken,
-    onProgress?: (elapsedMs: number, buildPercent: number) => void
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    terminalName?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal();
+    const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
+    const shared = sharedBuildProps(projectPath);
+    const noRestore = restoreFlag(projectPath);
     const result = await runBuildCommand(terminal, logArgs => {
-        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${logArgs}`;
+        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${shared} ${logArgs}`;
         return `echo '▶ Building...' && ${buildCmd}`;
     }, 600_000, token, onProgress);
     if (!result.success) {
         return result;
     }
 
-    const appPath = findIosAppBundle(projectPath, platform.framework, config);
+    const appPath = findIosAppBundle(projectPath, platform.framework, config, 'simulator');
     if (!appPath) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not find .app bundle.');
         return result;
@@ -108,12 +119,13 @@ async function launchIosSimulatorFromBin(
     projectPath: string,
     platform: Platform,
     device: Device,
-    config: string
+    config: string,
+    terminalName?: string
 ): Promise<boolean> {
-    const terminal = getBuildTerminal();
+    const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
-    const appPath = findIosAppBundle(projectPath, platform.framework, config);
+    const appPath = findIosAppBundle(projectPath, platform.framework, config, 'simulator');
     if (!appPath) {
         vscode.window.showErrorMessage(`MAUI Deploy: Could not find a ${config} .app bundle in bin/${config}/${platform.framework}. Build the app first.`);
         return false;
@@ -127,8 +139,6 @@ async function launchIosSimulatorApp(
     appPath: string,
     device: Device
 ): Promise<boolean> {
-    sendSilent(terminal, `echo '▶ Installing...' && xcrun simctl install ${device.id} "${appPath}"`);
-
     const bundleId = await getBundleId(appPath);
     if (!bundleId) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not determine bundle ID.');
@@ -137,7 +147,9 @@ async function launchIosSimulatorApp(
 
     sendSilent(terminal,
         `xcrun simctl terminate ${device.id} ${bundleId} 2>/dev/null; ` +
-        `echo '▶ Launching...' && xcrun simctl launch ${device.id} ${bundleId}`
+        `xcrun simctl uninstall ${device.id} ${bundleId} 2>/dev/null; ` +
+        `echo '▶ Installing...' && xcrun simctl install ${device.id} "${appPath}" && ` +
+        `echo '▶ Launching...' && for i in 1 2 3 4 5; do xcrun simctl launch ${device.id} ${bundleId} 2>/dev/null && break; echo "  Retry $i..."; sleep 2; done`
     );
 
     return true;
@@ -149,21 +161,25 @@ async function buildAndDeployIosDevice(
     device: Device,
     config: string,
     token?: vscode.CancellationToken,
-    onProgress?: (elapsedMs: number, buildPercent: number) => void
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    terminalName?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal();
+    const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
     // Build for physical device (needs RuntimeIdentifier ios-arm64)
+    const shared = sharedBuildProps(projectPath);
+    const noRestore = restoreFlag(projectPath);
+    const fastProps = iosFastBuildProps(config, 'physical').join(' ');
     const result = await runBuildCommand(terminal, logArgs => {
-        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} -r ios-arm64 ${logArgs}`;
+        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -r ios-arm64 ${fastProps} ${shared} ${logArgs}`;
         return `echo '▶ Building for device...' && ${buildCmd}`;
     }, 600_000, token, onProgress);
     if (!result.success) {
         return result;
     }
 
-    const appPath = findIosAppBundle(projectPath, platform.framework, config);
+    const appPath = findIosAppBundle(projectPath, platform.framework, config, 'physical');
     if (!appPath) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not find .app bundle.');
         return result;
@@ -177,12 +193,13 @@ async function launchIosDeviceFromBin(
     projectPath: string,
     platform: Platform,
     device: Device,
-    config: string
+    config: string,
+    terminalName?: string
 ): Promise<boolean> {
-    const terminal = getBuildTerminal();
+    const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
-    const appPath = findIosAppBundle(projectPath, platform.framework, config);
+    const appPath = findIosAppBundle(projectPath, platform.framework, config, 'physical');
     if (!appPath) {
         vscode.window.showErrorMessage(`MAUI Deploy: Could not find a ${config} .app bundle in bin/${config}/${platform.framework}. Build the app first.`);
         return false;
@@ -221,18 +238,22 @@ async function buildAndDeployAndroid(
     device: Device,
     config: string,
     token?: vscode.CancellationToken,
-    onProgress?: (elapsedMs: number, buildPercent: number) => void
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    terminalName?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal();
+    const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
     return runBuildCommand(terminal, logArgs => {
+        const shared = sharedBuildProps(projectPath);
+        const noRestore = restoreFlag(projectPath);
         const buildCmd = [
-            `dotnet build "${projectPath}"`,
+            `dotnet build ${noRestore} "${projectPath}"`,
             `-t:Run`,
             `-f ${platform.framework}`,
             `-c ${config}`,
             `/p:AdbTarget="-s ${device.id}"`,
+            shared,
             ...androidFastBuildProps(config),
             logArgs
         ].join(' ');
@@ -244,9 +265,10 @@ async function launchAndroidFromBin(
     projectPath: string,
     platform: Platform,
     device: Device,
-    config: string
+    config: string,
+    terminalName?: string
 ): Promise<boolean> {
-    const terminal = getBuildTerminal();
+    const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
     const apkPath = findAndroidApk(projectPath, platform.framework, config);
@@ -269,32 +291,6 @@ async function launchAndroidFromBin(
     return true;
 }
 
-export function openLogViewer(platform: Platform, device: Device, projectPath: string) {
-    const terminal = getLogTerminal();
-    terminal.show();
-
-    const appName = projectPath.replace(/.*\//, '').replace('.csproj', '');
-
-    if (platform.name === 'iOS') {
-        if (device.type === 'physical') {
-            // Physical iOS device — use log show via devicectl or os_log
-            sendSilent(terminal,
-                `xcrun devicectl device process launch --device ${device.id} ` +
-                `--console ${appName} 2>/dev/null || ` +
-                `echo 'Tip: use Console.app to view logs from physical devices'`
-            );
-        } else {
-            sendSilent(terminal,
-                `xcrun simctl spawn ${device.id} log stream ` +
-                `--level debug --style compact ` +
-                `--predicate 'processImagePath contains "${appName}" AND NOT subsystem BEGINSWITH "com.apple."'`
-            );
-        }
-    } else {
-        sendSilent(terminal, `adb -s ${device.id} logcat -s dotnet mono-rt Mono`);
-    }
-}
-
 export async function buildOnly(
     projectPath: string,
     platform: Platform,
@@ -304,7 +300,7 @@ export async function buildOnly(
     terminal.show();
 
     return runBuildCommand(terminal, logArgs => {
-        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${logArgs}`;
+        const buildCmd = `dotnet build ${restoreFlag(projectPath)} "${projectPath}" -f ${platform.framework} -c ${config} ${logArgs}`;
         return `echo '▶ Pre-building for debug...' && ${buildCmd} && echo '✅ BUILD_DONE'`;
     });
 }
@@ -330,62 +326,428 @@ export async function runTests(
     );
 }
 
+/** Shared props for all builds: injects hot reload agent + XAML diagnostics.
+ *  Keeping these consistent between Run and Debug ensures CoreCompile
+ *  can skip when switching modes (same Compile items, same intermediate assembly).
+ *  Note: we do NOT force MauiXamlInflator=SourceGen — the project's own setting
+ *  is respected. We only enable diagnostics so the source gen (if active) emits
+ *  the ResourceProvider2 preamble in InitializeComponent. */
+function sharedBuildProps(projectPath: string, hotReloadPort = DEFAULT_XAML_HOT_RELOAD_PORT): string {
+    const hotReloadAgent = createHotReloadAgentFiles(hotReloadPort);
+    const targetProjectPath = path.resolve(projectPath);
+    return [
+        shellQuote(`-p:CustomAfterMicrosoftCommonTargets=${hotReloadAgent.targetsPath}`),
+        shellQuote(`-p:MauiDeployHotReloadAgentSource=${hotReloadAgent.sourcePath}`),
+        shellQuote(`-p:MauiDeployHotReloadTargetProject=${targetProjectPath}`),
+        '-p:EnableMauiXamlDiagnostics=true',
+        '-p:MauiXamlLineInfo=true'
+    ].join(' ');
+}
+
+/** Returns '--no-restore' unless the project needs a restore (csproj or related config newer than assets file). */
+function restoreFlag(projectPath: string): string {
+    try {
+        const projectDir = path.dirname(projectPath);
+        const assetsFile = path.join(projectDir, 'obj', 'project.assets.json');
+        if (!fs.existsSync(assetsFile)) { return ''; }
+        const assetsMtime = fs.statSync(assetsFile).mtimeMs;
+
+        // Check csproj and any Directory.Build/Packages/NuGet config files up the tree
+        const filesToCheck = [projectPath];
+        let dir: string | undefined = projectDir;
+        while (dir) {
+            for (const name of [
+                'Directory.Build.props', 'Directory.Build.targets',
+                'Directory.Packages.props', 'NuGet.config', 'nuget.config',
+                'global.json',
+            ]) {
+                const candidate = path.join(dir, name);
+                if (fs.existsSync(candidate)) { filesToCheck.push(candidate); }
+            }
+            // Stop at repo/solution root
+            if (fs.existsSync(path.join(dir, '.git')) || fs.existsSync(path.join(dir, '.sln')) || fs.existsSync(path.join(dir, '.slnx'))) { break; }
+            const parent = path.dirname(dir);
+            if (parent === dir) { break; }
+            dir = parent;
+        }
+
+        for (const file of filesToCheck) {
+            if (fs.statSync(file).mtimeMs > assetsMtime) { return ''; }
+        }
+    } catch { return ''; }
+    return '--no-restore';
+}
+
 export async function buildForDebug(
     projectPath: string,
     platform: Platform,
     config: string,
     deviceType?: 'simulator' | 'physical',
     token?: vscode.CancellationToken,
-    onProgress?: (elapsedMs: number, buildPercent: number) => void
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    hotReloadPort = DEFAULT_XAML_HOT_RELOAD_PORT
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal();
+    const terminal = getBuildTerminal(false);
     terminal.show();
-
-    const hotReloadAgent = createHotReloadAgentFiles();
 
     // Build with debug flags — MtouchDebug=true enables Mono SDB in iOS apps
     const extraProps = platform.name === 'iOS'
-        ? '-p:MtouchDebug=true'
+        ? `-p:MtouchDebug=true ${iosFastBuildProps(config, deviceType).join(' ')}`
         : `-p:EmbedAssembliesIntoApk=true ${androidFastBuildProps(config).join(' ')}`;
 
+    const shared = sharedBuildProps(projectPath, hotReloadPort);
+    const noRestore = restoreFlag(projectPath);
     const rid = platform.name === 'iOS' && deviceType === 'physical' ? ' -r ios-arm64' : '';
     return runBuildCommand(terminal, logArgs => {
-        const hotReloadProps = [
-            shellQuote(`-p:CustomAfterMicrosoftCommonTargets=${hotReloadAgent.targetsPath}`),
-            shellQuote(`-p:MauiDeployHotReloadAgentSource=${hotReloadAgent.sourcePath}`),
-            '-p:MauiXamlInflator=SourceGen',
-            '-p:EnableMauiXamlDiagnostics=true',
-            '-p:MauiXamlLineInfo=true'
-        ].join(' ');
-        const buildCmd = `dotnet build "${projectPath}" -f ${platform.framework} -c ${config} ${extraProps}${rid} ${hotReloadProps} ${logArgs}`;
+        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${extraProps}${rid} ${shared} ${logArgs}`;
         return `echo '▶ Building for debug...' && ${buildCmd} && echo '✅ BUILD_DONE'`;
     }, 600_000, token, onProgress);
 }
 
-function createHotReloadAgentFiles(): { sourcePath: string; targetsPath: string } {
+function createHotReloadAgentFiles(hotReloadPort: number): { sourcePath: string; targetsPath: string } {
     const directory = path.join(os.tmpdir(), 'mauideploy-hotreload');
     fs.mkdirSync(directory, { recursive: true });
 
     const sourcePath = path.join(directory, 'MauiDeploy.HotReloadAgent.g.cs');
     const targetsPath = path.join(directory, 'MauiDeploy.HotReloadAgent.targets');
 
-    fs.writeFileSync(sourcePath, hotReloadAgentSource(), 'utf8');
-    fs.writeFileSync(targetsPath, hotReloadAgentTargets(), 'utf8');
+    writeIfChanged(sourcePath, hotReloadAgentSource(hotReloadPort));
+    writeIfChanged(targetsPath, hotReloadAgentTargets());
 
     return { sourcePath, targetsPath };
+}
+
+/** Create the dotnet-watch bridge project that connects to dotnet-watch's named pipe
+ *  and forwards metadata deltas to the MAUI app's HTTP agent.
+ *  Returns the project directory path. */
+export function createHotReloadBridgeProject(mauiProjectPath: string, hotReloadPort = DEFAULT_XAML_HOT_RELOAD_PORT): string {
+    const directory = path.join(os.tmpdir(), 'mauideploy-hotreload-bridge');
+    fs.mkdirSync(directory, { recursive: true });
+
+    const csprojPath = path.join(directory, 'MauiDeploy.HotReloadBridge.csproj');
+    const programPath = path.join(directory, 'Program.cs');
+    const signalPath = path.join(directory, 'bridge-ready.signal');
+
+    // Clean up stale signal file
+    try { fs.rmSync(signalPath, { force: true }); } catch { }
+
+    writeIfChanged(csprojPath, hotReloadBridgeCsproj(mauiProjectPath));
+    writeIfChanged(programPath, hotReloadBridgeSource(hotReloadPort));
+
+    return directory;
+}
+
+function hotReloadBridgeCsproj(mauiProjectPath: string): string {
+    const absProjectPath = path.resolve(mauiProjectPath);
+    return `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="${absProjectPath}" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
+  </ItemGroup>
+</Project>
+`;
+}
+
+function hotReloadBridgeSource(hotReloadPort: number): string {
+    return `// <auto-generated />
+// MauiDeploy Hot Reload Bridge — connects to dotnet-watch named pipe and forwards
+// metadata deltas to the MAUI app's HTTP agent.
+using System;
+using System.Buffers.Binary;
+using System.IO;
+using System.IO.Pipes;
+using System.Net.Http;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+var pipeName = Environment.GetEnvironmentVariable("DOTNET_WATCH_HOTRELOAD_NAMEDPIPE_NAME");
+if (string.IsNullOrEmpty(pipeName))
+{
+    Console.Error.WriteLine("[MauiDeploy Bridge] DOTNET_WATCH_HOTRELOAD_NAMEDPIPE_NAME not set. Exiting.");
+    // Write signal file to unblock the extension even on failure
+    File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "bridge-ready.signal"), "error:no-pipe-name");
+    Thread.Sleep(Timeout.Infinite);
+    return;
+}
+
+Console.WriteLine($"[MauiDeploy Bridge] Connecting to pipe: {pipeName}");
+
+using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+try
+{
+    pipe.Connect(5000);
+    Console.WriteLine("[MauiDeploy Bridge] Connected to dotnet-watch pipe.");
+}
+catch (TimeoutException)
+{
+    Console.Error.WriteLine("[MauiDeploy Bridge] Failed to connect to dotnet-watch pipe within 5s.");
+    File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "bridge-ready.signal"), "error:pipe-timeout");
+    Thread.Sleep(Timeout.Infinite);
+    return;
+}
+
+// Send ClientInitializationResponse: version(byte 0) + capabilities(string)
+// Query capabilities from env or use a reasonable default set
+var capabilities = "Baseline AddMethodToExistingType AddStaticFieldToExistingType NewTypeDefinition ChangeCustomAttributes UpdateParameters AddExplicitInterfaceImplementation";
+await WriteByteAsync(pipe, 0); // version
+await WriteStringAsync(pipe, capabilities);
+Console.WriteLine($"[MauiDeploy Bridge] Sent capabilities: {capabilities}");
+
+// Write signal file so the extension knows we're ready
+var signalDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
+// Also try writing to the project directory (where the extension looks)
+var bridgeDir = Path.GetDirectoryName(typeof(object).Assembly.Location) ?? AppContext.BaseDirectory;
+// Use a well-known location
+var signalPath = Path.Combine(Path.GetTempPath(), "mauideploy-hotreload-bridge", "bridge-ready.signal");
+Directory.CreateDirectory(Path.GetDirectoryName(signalPath)!);
+File.WriteAllText(signalPath, $"ready:{pipeName}");
+Console.WriteLine($"[MauiDeploy Bridge] Signal written. Waiting for deltas...");
+
+// Read initial updates
+await ReceiveUpdatesAsync(pipe, initialPhase: true);
+
+// Main loop: receive deltas and forward to MAUI app
+await ReceiveUpdatesAsync(pipe, initialPhase: false);
+
+Console.WriteLine("[MauiDeploy Bridge] Pipe disconnected. Exiting.");
+
+async Task ReceiveUpdatesAsync(NamedPipeClientStream stream, bool initialPhase)
+{
+    using var httpClient = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:${hotReloadPort}"), Timeout = TimeSpan.FromSeconds(30) };
+
+    while (stream.IsConnected)
+    {
+        var requestType = await ReadByteAsync(stream);
+        switch (requestType)
+        {
+            case 1: // ManagedCodeUpdate
+                await HandleManagedCodeUpdateAsync(stream, httpClient);
+                break;
+            case 2: // StaticAssetUpdate
+                await SkipStaticAssetUpdateAsync(stream);
+                // Send success response
+                await WriteByteAsync(stream, 2); // ResponseType.UpdateResponse
+                await WriteBoolAsync(stream, true);
+                await WriteInt32Async(stream, 0); // 0 log entries
+                break;
+            case 3: // InitialUpdatesCompleted
+                if (initialPhase) return;
+                break;
+            default:
+                Console.Error.WriteLine($"[MauiDeploy Bridge] Unknown request type: {requestType}");
+                return;
+        }
+    }
+}
+
+async Task HandleManagedCodeUpdateAsync(NamedPipeClientStream stream, HttpClient httpClient)
+{
+    // Read ManagedCodeUpdateRequest
+    var version = await ReadByteAsync(stream);
+    if (version != 4)
+    {
+        Console.Error.WriteLine($"[MauiDeploy Bridge] Unsupported ManagedCodeUpdate version: {version}");
+        return;
+    }
+
+    var count = await ReadInt32Async(stream);
+    Console.WriteLine($"[MauiDeploy Bridge] Received {count} delta(s)");
+
+    var updates = new List<object>();
+    for (var i = 0; i < count; i++)
+    {
+        var moduleId = await ReadGuidAsync(stream);
+        var metadataDelta = await ReadByteArrayAsync(stream);
+        var ilDelta = await ReadByteArrayAsync(stream);
+        var pdbDelta = await ReadByteArrayAsync(stream);
+        var updatedTypes = await ReadIntArrayAsync(stream);
+
+        Console.WriteLine($"[MauiDeploy Bridge]   Delta {i}: moduleId={moduleId}, metadata={metadataDelta.Length}B, il={ilDelta.Length}B, pdb={pdbDelta.Length}B, types={updatedTypes.Length}");
+
+        updates.Add(new
+        {
+            moduleId = moduleId.ToString(),
+            metadataDelta = Convert.ToBase64String(metadataDelta),
+            ilDelta = Convert.ToBase64String(ilDelta),
+            pdbDelta = Convert.ToBase64String(pdbDelta),
+            updatedTypes = updatedTypes
+        });
+    }
+
+    var responseLoggingLevel = await ReadByteAsync(stream);
+
+    // Forward to MAUI app via HTTP POST /delta
+    var success = false;
+    try
+    {
+        var payload = JsonSerializer.Serialize(new { updates });
+        var content = new StringContent(payload, Encoding.UTF8, "application/json");
+        var response = await httpClient.PostAsync("/delta", content);
+        var responseBody = await response.Content.ReadAsStringAsync();
+        Console.WriteLine($"[MauiDeploy Bridge] App response: {response.StatusCode} — {responseBody}");
+        success = response.IsSuccessStatusCode;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[MauiDeploy Bridge] Failed to forward deltas to app: {ex.Message}");
+    }
+
+    // Send UpdateResponse back to dotnet-watch
+    await WriteByteAsync(stream, 2); // ResponseType.UpdateResponse
+    await WriteBoolAsync(stream, success);
+    await WriteInt32Async(stream, 0); // 0 log entries
+}
+
+async Task SkipStaticAssetUpdateAsync(NamedPipeClientStream stream)
+{
+    var version = await ReadByteAsync(stream);
+    await ReadStringAsync(stream); // assemblyName
+    await ReadBoolAsync(stream); // isApplicationProject
+    await ReadStringAsync(stream); // relativePath
+    await ReadByteArrayAsync(stream); // contents
+    await ReadByteAsync(stream); // responseLoggingLevel
+}
+
+// ── Stream primitives (matching dotnet-watch protocol) ──
+
+async Task WriteByteAsync(Stream s, byte value)
+{
+    var buf = new byte[] { value };
+    await s.WriteAsync(buf);
+}
+
+async Task WriteBoolAsync(Stream s, bool value)
+{
+    await WriteByteAsync(s, value ? (byte)1 : (byte)0);
+}
+
+async Task WriteInt32Async(Stream s, int value)
+{
+    var buf = new byte[4];
+    BinaryPrimitives.WriteInt32LittleEndian(buf, value);
+    await s.WriteAsync(buf);
+}
+
+async Task WriteStringAsync(Stream s, string value)
+{
+    var bytes = Encoding.UTF8.GetBytes(value);
+    await Write7BitEncodedIntAsync(s, bytes.Length);
+    await s.WriteAsync(bytes);
+}
+
+async Task Write7BitEncodedIntAsync(Stream s, int value)
+{
+    var uValue = (uint)value;
+    while (uValue > 127)
+    {
+        await WriteByteAsync(s, (byte)(uValue | 0x80));
+        uValue >>= 7;
+    }
+    await WriteByteAsync(s, (byte)uValue);
+}
+
+async Task<byte> ReadByteAsync(Stream s)
+{
+    var buf = new byte[1];
+    await s.ReadExactlyAsync(buf, 0, 1);
+    return buf[0];
+}
+
+async Task<bool> ReadBoolAsync(Stream s)
+{
+    return await ReadByteAsync(s) != 0;
+}
+
+async Task<int> ReadInt32Async(Stream s)
+{
+    var buf = new byte[4];
+    await s.ReadExactlyAsync(buf, 0, 4);
+    return BinaryPrimitives.ReadInt32LittleEndian(buf);
+}
+
+async Task<Guid> ReadGuidAsync(Stream s)
+{
+    var buf = new byte[16];
+    await s.ReadExactlyAsync(buf, 0, 16);
+    return new Guid(buf);
+}
+
+async Task<byte[]> ReadByteArrayAsync(Stream s)
+{
+    var length = await ReadInt32Async(s);
+    var buf = new byte[length];
+    if (length > 0)
+        await s.ReadExactlyAsync(buf, 0, length);
+    return buf;
+}
+
+async Task<int[]> ReadIntArrayAsync(Stream s)
+{
+    var count = await ReadInt32Async(s);
+    var result = new int[count];
+    if (count > 0)
+    {
+        var buf = new byte[count * 4];
+        await s.ReadExactlyAsync(buf, 0, buf.Length);
+        for (var i = 0; i < count; i++)
+            result[i] = BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(i * 4, 4));
+    }
+    return result;
+}
+
+async Task<string> ReadStringAsync(Stream s)
+{
+    var length = await Read7BitEncodedIntAsync(s);
+    if (length == 0) return string.Empty;
+    var buf = new byte[length];
+    await s.ReadExactlyAsync(buf, 0, length);
+    return Encoding.UTF8.GetString(buf);
+}
+
+async Task<int> Read7BitEncodedIntAsync(Stream s)
+{
+    var result = 0;
+    var shift = 0;
+    byte b;
+    do
+    {
+        b = await ReadByteAsync(s);
+        result |= (b & 0x7F) << shift;
+        shift += 7;
+    } while ((b & 0x80) != 0);
+    return result;
+}
+`;
+}
+
+/** Only write file if content differs — preserves mtime for MSBuild incremental builds. */
+function writeIfChanged(filePath: string, content: string) {
+    try {
+        if (fs.existsSync(filePath) && fs.readFileSync(filePath, 'utf8') === content) {
+            return;
+        }
+    } catch { }
+    fs.writeFileSync(filePath, content, 'utf8');
 }
 
 function hotReloadAgentTargets(): string {
     return `<?xml version="1.0" encoding="utf-8"?>
 <Project>
-  <ItemGroup Condition="'$(MauiDeployHotReloadAgentSource)' != ''">
+    <ItemGroup Condition="'$(MauiDeployHotReloadAgentSource)' != '' and '$(MSBuildProjectFullPath)' == '$(MauiDeployHotReloadTargetProject)'">
     <Compile Include="$(MauiDeployHotReloadAgentSource)" Link="MauiDeploy.HotReloadAgent.g.cs" Visible="false" />
   </ItemGroup>
 </Project>
 `;
 }
 
-function hotReloadAgentSource(): string {
+function hotReloadAgentSource(hotReloadPort: number): string {
     return `// <auto-generated />
 #nullable disable
 using System;
@@ -412,7 +774,7 @@ namespace MauiDeploy.HotReload;
 
 internal static class XamlHotReloadAgent
 {
-    private const int ServerPort = 55337;
+    private const int ServerPort = ${hotReloadPort};
     private static readonly string CrLf = new string(new[] { (char)13, (char)10 });
     private static readonly object Gate = new();
     private static readonly ConcurrentDictionary<string, string> Resources = new(StringComparer.OrdinalIgnoreCase);
@@ -423,6 +785,8 @@ internal static class XamlHotReloadAgent
     private static readonly ConcurrentDictionary<Type, BindableProperty[]> DataTemplatePropertiesByType = new();
     private static readonly MethodInfo GetIsBoundMethod = typeof(BindableObject).GetMethod("GetIsBound", BindingFlags.NonPublic | BindingFlags.Instance);
     private static readonly PropertyInfo IsReadOnlyPropertyInfo = typeof(BindableProperty).GetProperty("IsReadOnly", BindingFlags.NonPublic | BindingFlags.Instance);
+    private static MethodInfo _loadFromXamlStringMethod;
+    private static MethodInfo _loadFromXamlExtensionMethod; // Extensions.LoadFromXaml<T> open generic
     private static readonly HashSet<string> StructuralPropertyNames = new(StringComparer.Ordinal)
     {
         "Children",
@@ -455,8 +819,12 @@ internal static class XamlHotReloadAgent
     private static string lastAppliedPath = string.Empty;
     private static string lastRequestedPath = string.Empty;
     private static string lastMatchedPath = string.Empty;
+    private static string lastTargetType = string.Empty;
+    private static string lastCandidateTypes = string.Empty;
     private static string lastReloadError = string.Empty;
     private static string lastServerError = string.Empty;
+    private static string lastStrategyLog = string.Empty;
+    private const string AgentVersion = "3";
 
     [ModuleInitializer]
     internal static void Initialize()
@@ -515,7 +883,9 @@ internal static class XamlHotReloadAgent
     {
         var normalizedPath = NormalizeResourcePath(resourcePath ?? string.Empty);
         var cachedResource = TryGetResource(normalizedPath, out _, out _) ? 1 : 0;
-        return $"serverStarted={Volatile.Read(ref serverStarted)}, serverPort={ServerPort}, serverError='{lastServerError}', activeViews={Volatile.Read(ref lastActiveViews)}, matchedViews={Volatile.Read(ref lastMatchedViews)}, reloadHandlers={Volatile.Read(ref lastReloadHandlers)}, explicitReloads={Volatile.Read(ref lastReloadedViews)}, inPlaceReloads={Volatile.Read(ref lastInPlaceReloadedViews)}, freshReloads={Volatile.Read(ref lastFreshReloadedViews)}, providerRequests={Volatile.Read(ref providerRequests)}, providerHits={Volatile.Read(ref providerHits)}, cachedResource={cachedResource}, reloadError='{lastReloadError}', lastApplied='{lastAppliedPath}', lastRequested='{lastRequestedPath}', lastMatched='{lastMatchedPath}', requested='{normalizedPath}'";
+        var xamlLoader = _loadFromXamlStringMethod != null ? "XamlLoader" : _loadFromXamlExtensionMethod != null ? "Extensions" : "none";
+        var providerIsSet = ResourceLoader.ResourceProvider2 != null ? 1 : 0;
+        return $"agentV={AgentVersion}, serverStarted={Volatile.Read(ref serverStarted)}, serverPort={ServerPort}, serverError='{lastServerError}', activeViews={Volatile.Read(ref lastActiveViews)}, matchedViews={Volatile.Read(ref lastMatchedViews)}, reloadHandlers={Volatile.Read(ref lastReloadHandlers)}, explicitReloads={Volatile.Read(ref lastReloadedViews)}, inPlaceReloads={Volatile.Read(ref lastInPlaceReloadedViews)}, freshReloads={Volatile.Read(ref lastFreshReloadedViews)}, providerInstalled={Volatile.Read(ref providerInstalled)}, providerIsSet={providerIsSet}, providerRequests={Volatile.Read(ref providerRequests)}, providerHits={Volatile.Read(ref providerHits)}, cachedResource={cachedResource}, xamlLoader='{xamlLoader}', reloadError='{lastReloadError}', strategyLog='{lastStrategyLog}', targetType='{lastTargetType}', candidates='{lastCandidateTypes}', lastApplied='{lastAppliedPath}', lastRequested='{lastRequestedPath}', lastMatched='{lastMatchedPath}', requested='{normalizedPath}'";
     }
 
     private static void StartServer()
@@ -530,9 +900,8 @@ internal static class XamlHotReloadAgent
     {
         try
         {
-            var listener = new TcpListener(IPAddress.Any, ServerPort);
-            listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            listener.Start();
+            var listener = CreateServerListener();
+            Debug.WriteLine($"[MauiDeploy] XAML Hot Reload server listening on port {ServerPort}");
 
             while (true)
             {
@@ -548,6 +917,26 @@ internal static class XamlHotReloadAgent
         }
     }
 
+    private static TcpListener CreateServerListener()
+    {
+        try
+        {
+            var listener = new TcpListener(IPAddress.IPv6Any, ServerPort);
+            listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            listener.Server.DualMode = true;
+            listener.Start();
+            return listener;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MauiDeploy] XAML Hot Reload dual-stack bind failed: {ex.Message}; falling back to IPv4.");
+            var listener = new TcpListener(IPAddress.Any, ServerPort);
+            listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            listener.Start();
+            return listener;
+        }
+    }
+
     private static void HandleClient(object state)
     {
         using var client = (TcpClient)state;
@@ -559,6 +948,7 @@ internal static class XamlHotReloadAgent
         {
             stream = client.GetStream();
             var request = ReadHttpRequest(stream);
+            Debug.WriteLine($"[MauiDeploy] XAML Hot Reload request: {request.Path} ({request.Body.Length} chars)");
             var result = HandleHttpRequest(request.Path, request.Body);
             WriteHttpResponse(stream, 200, "OK", result);
         }
@@ -581,7 +971,176 @@ internal static class XamlHotReloadAgent
         if (requestPath.StartsWith("/status", StringComparison.OrdinalIgnoreCase))
             return GetStatus(resourcePath);
 
+        if (requestPath.StartsWith("/delta", StringComparison.OrdinalIgnoreCase))
+            return ApplyMetadataDeltas(root);
+
+        if (requestPath.StartsWith("/capabilities", StringComparison.OrdinalIgnoreCase))
+            return GetHotReloadCapabilities();
+
         throw new InvalidOperationException("Unknown XAML Hot Reload request path: " + requestPath);
+    }
+
+    private static string GetHotReloadCapabilities()
+    {
+        try
+        {
+            var caps = typeof(System.Reflection.Metadata.MetadataUpdater)
+                .GetMethod("GetCapabilities", BindingFlags.Public | BindingFlags.Static)?
+                .Invoke(null, null) as string;
+            return caps ?? string.Empty;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: GetCapabilities failed: {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+    private static string ApplyMetadataDeltas(JsonElement root)
+    {
+        var applied = 0;
+        var errors = new List<string>();
+
+        if (!root.TryGetProperty("updates", out var updatesElement))
+            return "No updates in delta payload";
+
+        foreach (var update in updatesElement.EnumerateArray())
+        {
+            try
+            {
+                var moduleIdStr = update.GetProperty("moduleId").GetString();
+                var metadataDelta = Convert.FromBase64String(update.GetProperty("metadataDelta").GetString());
+                var ilDelta = Convert.FromBase64String(update.GetProperty("ilDelta").GetString());
+                var pdbDelta = update.TryGetProperty("pdbDelta", out var pdbProp) && pdbProp.ValueKind == JsonValueKind.String
+                    ? Convert.FromBase64String(pdbProp.GetString())
+                    : Array.Empty<byte>();
+
+                var moduleId = Guid.Parse(moduleIdStr);
+                Assembly targetAssembly = null;
+
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        if (asm.IsDynamic) continue;
+                        var modules = asm.GetModules();
+                        if (modules.Length > 0 && modules[0].ModuleVersionId == moduleId)
+                        {
+                            targetAssembly = asm;
+                            break;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (targetAssembly == null)
+                {
+                    var msg = $"Assembly not found for moduleId {moduleId}";
+                    errors.Add(msg);
+                    Debug.WriteLine($"[MauiDeploy] Hot Reload: {msg}");
+                    continue;
+                }
+
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: applying delta to {targetAssembly.GetName().Name} (moduleId={moduleId})");
+
+                System.Reflection.Metadata.MetadataUpdater.ApplyUpdate(
+                    targetAssembly,
+                    metadataDelta,
+                    ilDelta,
+                    pdbDelta);
+
+                applied++;
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: delta applied to {targetAssembly.GetName().Name}");
+
+                // Invoke MetadataUpdateHandler callbacks (ClearCache + UpdateApplication)
+                // The runtime does this automatically after ApplyUpdate in .NET 9+,
+                // but we explicitly invoke for earlier runtimes as a safety net.
+                if (update.TryGetProperty("updatedTypes", out var typesElement))
+                {
+                    try
+                    {
+                        var updatedTypes = new List<Type>();
+                        foreach (var typeToken in typesElement.EnumerateArray())
+                        {
+                            var token = typeToken.GetInt32();
+                            try
+                            {
+                                var type = targetAssembly.GetModules()[0].ResolveType(token);
+                                if (type != null)
+                                    updatedTypes.Add(type);
+                            }
+                            catch { }
+                        }
+
+                        if (updatedTypes.Count > 0)
+                            InvokeMetadataUpdateHandlers(updatedTypes.ToArray());
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload: handler invocation warning: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                var unwrapped = UnwrapException(ex);
+                var msg = $"Delta apply failed: {unwrapped.GetType().Name}: {unwrapped.Message}";
+                errors.Add(msg);
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: {msg}");
+            }
+        }
+
+        var result = $"Applied {applied} delta(s)";
+        if (errors.Count > 0)
+            result += $", {errors.Count} error(s): " + string.Join("; ", errors);
+        return result;
+    }
+
+    private static void InvokeMetadataUpdateHandlers(Type[] updatedTypes)
+    {
+        // Find all types with [MetadataUpdateHandler] attribute and invoke their
+        // ClearCache and UpdateApplication methods.
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            try
+            {
+                foreach (var attr in asm.GetCustomAttributes())
+                {
+                    var attrType = attr.GetType();
+                    if (attrType.FullName != "System.Reflection.Metadata.MetadataUpdateHandlerAttribute")
+                        continue;
+
+                    var handlerTypeProp = attrType.GetProperty("HandlerType");
+                    if (handlerTypeProp?.GetValue(attr) is not Type handlerType)
+                        continue;
+
+                    try
+                    {
+                        var clearCache = handlerType.GetMethod("ClearCache",
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                            null, new[] { typeof(Type[]) }, null);
+                        clearCache?.Invoke(null, new object[] { updatedTypes });
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload: ClearCache on {handlerType.Name} failed: {UnwrapException(ex).Message}");
+                    }
+
+                    try
+                    {
+                        var updateApp = handlerType.GetMethod("UpdateApplication",
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                            null, new[] { typeof(Type[]) }, null);
+                        updateApp?.Invoke(null, new object[] { updatedTypes });
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload: UpdateApplication on {handlerType.Name} failed: {UnwrapException(ex).Message}");
+                    }
+                }
+            }
+            catch { }
+        }
     }
 
     private static string ReadJsonString(JsonElement root, string propertyName)
@@ -756,6 +1315,15 @@ internal static class XamlHotReloadAgent
         var inPlaceReloadedViews = 0;
         var freshReloadedViews = 0;
         lastReloadError = string.Empty;
+        lastStrategyLog = string.Empty;
+
+        // Primary lookup: use XamlResourceIdAttribute (assembly-level) to find the
+        // Type that owns this XAML file.  This is the same attribute the source gen
+        // consults when it checks ResourceProvider2 inside InitializeComponent, so
+        // the path format is guaranteed to match.
+        var targetType = FindTypeByXamlResourceId(resourcePath) ?? FindTypeByXamlClass(newXaml);
+        lastTargetType = targetType?.FullName ?? string.Empty;
+        var candidateTypes = new List<string>();
 
         try
         {
@@ -769,7 +1337,13 @@ internal static class XamlHotReloadAgent
                     reloadHandlers++;
 
                 var viewType = item.GetType();
-                if (!IsMatchingXamlView(viewType, resourcePath))
+                if (candidateTypes.Count < 24)
+                {
+                    var xamlPath = GetXamlFilePath(viewType);
+                    candidateTypes.Add(string.IsNullOrEmpty(xamlPath) ? viewType.Name : viewType.Name + "=" + xamlPath);
+                }
+
+                if (!IsMatchingReloadTarget(viewType, targetType, resourcePath))
                     continue;
 
                 matchedViews++;
@@ -787,6 +1361,19 @@ internal static class XamlHotReloadAgent
                     reloadedViews++;
                     inPlaceReloadedViews++;
                     Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} via fast-path in {reloadSw.ElapsedMilliseconds}ms");
+                    continue;
+                }
+
+                // Direct XAML string reload: parse cached XAML into the live view.
+                // Bypasses compiled InitializeComponent which ignores ResourceProvider2
+                // when the XAML source generator is used (.NET 10+).
+                var xamlResult = RunReloadStrategy(viewType, "LoadFromXaml",
+                    () => TryReloadViaXamlString(item, viewType, resourcePath));
+                if (xamlResult == ReloadStrategyResult.Succeeded)
+                {
+                    reloadedViews++;
+                    inPlaceReloadedViews++;
+                    Debug.WriteLine($"[MauiDeploy] Hot Reload: reloaded {viewType.Name} via LoadFromXaml in {reloadSw.ElapsedMilliseconds}ms");
                     continue;
                 }
 
@@ -811,7 +1398,7 @@ internal static class XamlHotReloadAgent
                     object bindingContext = null;
                     try
                     {
-                        replacement = CreateReplacement(viewType, item, out bindingContext);
+                        replacement = CreateReplacement(viewType, item, resourcePath, out bindingContext);
                     }
                     catch (Exception ex)
                     {
@@ -886,7 +1473,7 @@ internal static class XamlHotReloadAgent
                             if (value == null)
                                 continue;
 
-                            if (!DataTemplateContainsMatchingView(value, resourcePath))
+                            if (!DataTemplateContainsMatchingView(value, resourcePath, targetType))
                             {
                                 Debug.WriteLine($"[MauiDeploy] Hot Reload: skipping {bindable.GetType().Name}.{prop.PropertyName} (template does not contain {Path.GetFileName(resourcePath)})");
                                 continue;
@@ -928,21 +1515,102 @@ internal static class XamlHotReloadAgent
         Volatile.Write(ref lastReloadedViews, reloadedViews);
         Volatile.Write(ref lastInPlaceReloadedViews, inPlaceReloadedViews);
         Volatile.Write(ref lastFreshReloadedViews, freshReloadedViews);
+        lastCandidateTypes = SanitizeForResponse(string.Join("|", candidateTypes.Distinct()), 500);
         return reloadedViews;
     }
 
     private static bool IsMatchingXamlView(Type viewType, string resourcePath)
     {
         var xamlPath = GetXamlFilePath(viewType);
-        if (string.IsNullOrEmpty(xamlPath))
+        if (!string.IsNullOrEmpty(xamlPath))
+        {
+            var normalizedXamlPath = NormalizeResourcePath(xamlPath);
+            if (string.Equals(normalizedXamlPath, resourcePath, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (normalizedXamlPath.EndsWith('/' + resourcePath, StringComparison.OrdinalIgnoreCase) ||
+                resourcePath.EndsWith('/' + normalizedXamlPath, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        // Fallback: match by type name when XamlFilePathAttribute is absent (XAML source gen)
+        var fileName = Path.GetFileNameWithoutExtension(resourcePath);
+        if (string.IsNullOrEmpty(fileName))
             return false;
 
-        var normalizedXamlPath = NormalizeResourcePath(xamlPath);
-        if (string.Equals(normalizedXamlPath, resourcePath, StringComparison.OrdinalIgnoreCase))
-            return true;
+        return string.Equals(viewType.Name, fileName, StringComparison.OrdinalIgnoreCase);
+    }
 
-        return normalizedXamlPath.EndsWith('/' + resourcePath, StringComparison.OrdinalIgnoreCase) ||
-            resourcePath.EndsWith('/' + normalizedXamlPath, StringComparison.OrdinalIgnoreCase);
+    private static bool IsMatchingReloadTarget(Type viewType, Type targetType, string resourcePath)
+    {
+        if (targetType != null)
+        {
+            if (viewType == targetType || targetType.IsAssignableFrom(viewType) || viewType.IsAssignableFrom(targetType))
+                return true;
+        }
+
+        return IsMatchingXamlView(viewType, resourcePath);
+    }
+
+    private static Type FindTypeByXamlClass(string xaml)
+    {
+        var className = ExtractXamlClassName(xaml);
+        if (string.IsNullOrEmpty(className))
+            return null;
+
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            try
+            {
+                var type = asm.GetType(className, throwOnError: false, ignoreCase: false);
+                if (type != null)
+                {
+                    Debug.WriteLine($"[MauiDeploy] Hot Reload: resolved x:Class {className} → {type.FullName}");
+                    return type;
+                }
+            }
+            catch { }
+        }
+
+        Debug.WriteLine($"[MauiDeploy] Hot Reload: x:Class type not found: {className}");
+        return null;
+    }
+
+    private static string ExtractXamlClassName(string xaml)
+    {
+        if (string.IsNullOrEmpty(xaml))
+            return string.Empty;
+
+        const string marker = "x:Class";
+        var index = xaml.IndexOf(marker, StringComparison.Ordinal);
+        while (index >= 0)
+        {
+            var equals = xaml.IndexOf('=', index + marker.Length);
+            if (equals < 0)
+                return string.Empty;
+
+            var pos = equals + 1;
+            while (pos < xaml.Length && char.IsWhiteSpace(xaml[pos]))
+                pos++;
+
+            if (pos >= xaml.Length)
+                return string.Empty;
+
+            var quote = xaml[pos];
+            if (quote != '"' && quote != (char)39)
+            {
+                index = xaml.IndexOf(marker, index + marker.Length, StringComparison.Ordinal);
+                continue;
+            }
+
+            var end = xaml.IndexOf(quote, pos + 1);
+            if (end <= pos + 1)
+                return string.Empty;
+
+            return xaml.Substring(pos + 1, end - pos - 1).Trim();
+        }
+
+        return string.Empty;
     }
 
     private static string GetXamlFilePath(Type viewType)
@@ -964,6 +1632,316 @@ internal static class XamlHotReloadAgent
 
             return string.Empty;
         });
+    }
+
+    // Resolve the CLR Type that owns a given XAML resource path using the assembly-level
+    // XamlResourceIdAttribute.  This is the same attribute the source gen consults inside
+    // its generated InitializeComponent, so the path format is always consistent.
+    private static readonly ConcurrentDictionary<string, Type> XamlResourceIdTypeCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private static Type FindTypeByXamlResourceId(string resourcePath)
+    {
+        if (XamlResourceIdTypeCache.TryGetValue(resourcePath, out var cached))
+            return cached;
+
+        // XamlResourceIdAttribute uses dot-separated embedded-resource style paths
+        // (e.g., "MyApp.Views.MainPage.xaml") whereas the extension sends
+        // slash-separated project-relative paths ("Views/MainPage.xaml").
+        // Build several candidate forms so we can match either style.
+        var slashPath = resourcePath.Replace('.', '/');
+        var dotPath = resourcePath.Replace('/', '.');
+        var fileName = Path.GetFileName(resourcePath);
+        var fileNameNoExt = Path.GetFileNameWithoutExtension(resourcePath);
+
+        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            try
+            {
+                foreach (var attr in asm.GetCustomAttributes())
+                {
+                    var attrType = attr.GetType();
+                    if (attrType.FullName != "Microsoft.Maui.Controls.Xaml.XamlResourceIdAttribute")
+                        continue;
+
+                    var pathProp = attrType.GetProperty("Path");
+                    var typeProp = attrType.GetProperty("Type");
+                    if (pathProp == null || typeProp == null)
+                        continue;
+
+                    var path = pathProp.GetValue(attr) as string;
+                    if (string.IsNullOrEmpty(path))
+                        continue;
+
+                    var normalizedAttrPath = NormalizeResourcePath(path);
+                    // Also convert dot-style to slash-style for comparison
+                    var attrSlash = normalizedAttrPath.Replace('.', '/');
+                    var attrDot = normalizedAttrPath.Replace('/', '.');
+
+                    if (ResourcePathsMatch(normalizedAttrPath, resourcePath) ||
+                        ResourcePathsMatch(attrSlash, slashPath) ||
+                        ResourcePathsMatch(attrDot, dotPath) ||
+                        ResourcePathsMatch(normalizedAttrPath, dotPath) ||
+                        ResourcePathsMatch(attrSlash, resourcePath))
+                    {
+                        if (typeProp.GetValue(attr) is Type match)
+                        {
+                            XamlResourceIdTypeCache[resourcePath] = match;
+                            Debug.WriteLine($"[MauiDeploy] Hot Reload: resolved {resourcePath} → {match.FullName} via XamlResourceIdAttribute (attr='{normalizedAttrPath}')");
+                            return match;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        Debug.WriteLine($"[MauiDeploy] Hot Reload: no XamlResourceIdAttribute match for {resourcePath} (dotPath='{dotPath}')");
+        return null;
+    }
+
+    private static bool ResourcePathsMatch(string a, string b)
+    {
+        var normalizedA = NormalizeComparableResourcePath(a);
+        var normalizedB = NormalizeComparableResourcePath(b);
+
+        if (string.Equals(normalizedA, normalizedB, StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (normalizedA.EndsWith('/' + normalizedB, StringComparison.OrdinalIgnoreCase) ||
+            normalizedB.EndsWith('/' + normalizedA, StringComparison.OrdinalIgnoreCase))
+            return true;
+        return false;
+    }
+
+    private static string NormalizeComparableResourcePath(string path)
+    {
+        path = NormalizeResourcePath(path ?? string.Empty).Trim('/');
+        if (path.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase))
+            path = path.Substring(0, path.Length - ".xaml".Length);
+
+        path = path.Replace('.', '/');
+        while (path.Contains("//"))
+            path = path.Replace("//", "/");
+
+        return path.Trim('/');
+    }
+
+    // Direct XAML string reload: bypass compiled InitializeComponent and load our cached XAML
+    // directly into the existing view via XamlLoader.Load(object, string). This is a fallback
+    // for cases where the source gen's ResourceProvider2 check cannot find the cached XAML.
+    private static bool TryReloadViaXamlString(object target, Type viewType, string resourcePath)
+    {
+        if (target is not BindableObject)
+            return false;
+
+        if (!TryGetResource(resourcePath, out var xaml, out _))
+            return false;
+
+        if (_loadFromXamlStringMethod == null && _loadFromXamlExtensionMethod == null)
+        {
+            // Strategy 1: XamlLoader.Load(object, string) — internal but public methods.
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                try
+                {
+                    var candidate = asm.GetType("Microsoft.Maui.Controls.Xaml.XamlLoader", throwOnError: false);
+                    if (candidate == null)
+                        continue;
+
+                    var method = candidate.GetMethod("Load",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static,
+                        null,
+                        new[] { typeof(object), typeof(string) },
+                        null);
+                    if (method != null)
+                    {
+                        _loadFromXamlStringMethod = method;
+                        Debug.WriteLine($"[MauiDeploy] Hot Reload: found XamlLoader.Load in {asm.GetName().Name}");
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            // Strategy 2: Extensions.LoadFromXaml<T>(this T, string) — public API, always available.
+            if (_loadFromXamlStringMethod == null)
+            {
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    try
+                    {
+                        var candidate = asm.GetType("Microsoft.Maui.Controls.Xaml.Extensions", throwOnError: false);
+                        if (candidate == null)
+                            continue;
+
+                        var methods = candidate.GetMethods(BindingFlags.Public | BindingFlags.Static);
+                        foreach (var m in methods)
+                        {
+                            if (m.Name == "LoadFromXaml" && m.IsGenericMethodDefinition && m.GetParameters().Length == 2)
+                            {
+                                _loadFromXamlExtensionMethod = m;
+                                Debug.WriteLine($"[MauiDeploy] Hot Reload: found Extensions.LoadFromXaml<T> in {asm.GetName().Name}");
+                                break;
+                            }
+                        }
+                        if (_loadFromXamlExtensionMethod != null)
+                            break;
+                    }
+                    catch { }
+                }
+            }
+
+            if (_loadFromXamlStringMethod == null && _loadFromXamlExtensionMethod == null)
+                Debug.WriteLine("[MauiDeploy] Hot Reload: no XAML loading method found in any loaded assembly");
+        }
+
+        if (_loadFromXamlStringMethod == null && _loadFromXamlExtensionMethod == null)
+            return false;
+
+        var bindingContext = (target as BindableObject)?.BindingContext;
+
+        SaveViewState(target, out var savedContent, out var savedToolbarItems);
+        ClearViewForReload(target);
+
+        try
+        {
+            if (_loadFromXamlStringMethod != null)
+            {
+                _loadFromXamlStringMethod.Invoke(null, new object[] { target, xaml });
+            }
+            else
+            {
+                var closed = _loadFromXamlExtensionMethod.MakeGenericMethod(viewType);
+                closed.Invoke(null, new object[] { target, xaml });
+            }
+        }
+        catch (Exception ex)
+        {
+            var unwrapped = UnwrapException(ex);
+            lastReloadError = $"LoadFromXaml threw {unwrapped.GetType().Name}: {unwrapped.Message}";
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: {lastReloadError}");
+            RestoreViewContent(target, savedContent, savedToolbarItems);
+            return false;
+        }
+
+        // Restore BindingContext if cleared
+        if (target is BindableObject boAfter && boAfter.BindingContext == null && bindingContext != null)
+            boAfter.BindingContext = bindingContext;
+
+        // Force implicit style resolution + layout invalidation.
+        // XamlLoader.Load creates new elements but they don't automatically pick up
+        // implicit styles from ancestor ResourceDictionaries (app-level themes, etc.).
+        // This causes labels/buttons to appear invisible (no TextColor, no background).
+        if (target is VisualElement reloadedVe)
+        {
+            try
+            {
+                ReapplyImplicitStyles(reloadedVe);
+                reloadedVe.InvalidateMeasureNonVirtual(Microsoft.Maui.Controls.Internals.InvalidationTrigger.Undefined);
+                if (target is Page reloadedPage)
+                    reloadedPage.ForceLayout();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: post-reload style/layout fixup warning: {UnwrapException(ex).Message}");
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Walk the visual tree and re-apply implicit styles to all elements.
+    /// After XamlLoader.Load, newly created elements don't resolve implicit styles
+    /// from ancestor ResourceDictionaries, so text can appear invisible (no TextColor set).
+    /// </summary>
+    private static void ReapplyImplicitStyles(Element root)
+    {
+        // Use the internal ApplyStyleSheetsInternal or force style resolution
+        // by temporarily removing and re-adding the element's Style,
+        // or by calling the internal SetInheritedBindingContext path.
+        try
+        {
+            // Strategy: call the internal "ApplyStyles" pipeline by invoking
+            // the protected OnParentResourcesChanged method which triggers
+            // implicit style lookup for the element and all descendants.
+            var method = typeof(Element).GetMethod("OnParentResourcesChanged",
+                BindingFlags.NonPublic | BindingFlags.Instance,
+                null,
+                new Type[] { typeof(IEnumerable<KeyValuePair<string, object>>) },
+                null);
+
+            if (method != null)
+            {
+                // Collect merged resources from the app level down
+                var appResources = Application.Current?.Resources;
+                if (appResources != null)
+                {
+                    var mergedResources = new List<KeyValuePair<string, object>>();
+                    CollectResources(appResources, mergedResources);
+                    method.Invoke(root, new object[] { mergedResources });
+                    Debug.WriteLine($"[MauiDeploy] Hot Reload: re-applied {mergedResources.Count} app resources to visual tree");
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: OnParentResourcesChanged failed: {UnwrapException(ex).Message}");
+        }
+
+        // Fallback: walk tree and force style re-evaluation per element
+        try
+        {
+            ForceStyleResolution(root);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: ForceStyleResolution failed: {UnwrapException(ex).Message}");
+        }
+    }
+
+    private static void CollectResources(ResourceDictionary dict, List<KeyValuePair<string, object>> result)
+    {
+        foreach (var kvp in dict)
+            result.Add(kvp);
+
+        if (dict.MergedDictionaries != null)
+        {
+            foreach (var merged in dict.MergedDictionaries)
+                CollectResources(merged, result);
+        }
+    }
+
+    /// <summary>
+    /// Walk every element in the tree and nudge MAUI into re-resolving implicit styles.
+    /// Sets Style=null then back, which triggers the internal style lookup machinery.
+    /// </summary>
+    private static void ForceStyleResolution(Element element)
+    {
+        if (element is VisualElement ve)
+        {
+            // If no explicit style is set, the element should pick up implicit styles.
+            // Toggling the internal style class triggers re-resolution.
+            if (ve.Style == null)
+            {
+                // Force MAUI to re-check implicit styles by briefly invalidating
+                try
+                {
+                    ve.InvalidateMeasureNonVirtual(Microsoft.Maui.Controls.Internals.InvalidationTrigger.Undefined);
+                }
+                catch { }
+            }
+        }
+
+        // Recurse into children
+        if (element is IVisualTreeElement vte)
+        {
+            foreach (var child in vte.GetVisualChildren())
+            {
+                if (child is Element childElement)
+                    ForceStyleResolution(childElement);
+            }
+        }
     }
 
     // Fast-path: collect attribute deltas in a validation pass, then apply atomically.
@@ -1155,12 +2133,15 @@ internal static class XamlHotReloadAgent
     {
         try
         {
-            return strategy() ? ReloadStrategyResult.Succeeded : ReloadStrategyResult.Rejected;
+            var result = strategy() ? ReloadStrategyResult.Succeeded : ReloadStrategyResult.Rejected;
+            lastStrategyLog += $"{name}={result} ";
+            return result;
         }
         catch (Exception ex)
         {
             var unwrapped = UnwrapException(ex);
             lastReloadError = name + ": " + FormatException(unwrapped);
+            lastStrategyLog += $"{name}=Failed({unwrapped.GetType().Name}) ";
             Debug.WriteLine($"[MauiDeploy] Hot Reload: {name} threw for {viewType.Name}: {unwrapped}");
             return ReloadStrategyResult.Failed;
         }
@@ -1231,28 +2212,19 @@ internal static class XamlHotReloadAgent
         var initMethod = viewType.GetMethod("InitializeComponent", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
         if (initMethod == null)
         {
-            Debug.WriteLine($"[MauiDeploy] Hot Reload: InitializeComponent not found on {viewType.Name}");
+            // Also check for InitializeComponentRuntime as a diagnostic
+            var runtimeMethod = viewType.GetMethod("InitializeComponentRuntime", BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+            lastReloadError = $"InitializeComponent not found on {viewType.Name} (runtime={runtimeMethod != null})";
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: {lastReloadError}");
             return false;
         }
 
+        Debug.WriteLine($"[MauiDeploy] Hot Reload: found InitializeComponent on {viewType.Name}, declaring type={initMethod.DeclaringType?.FullName}");
+
         var bindingContext = (target as BindableObject)?.BindingContext;
 
-        // Save content so we can restore on failure (preserves fallback strategies)
-        View savedContent = null;
-        if (target is ContentPage savePage)
-            savedContent = savePage.Content;
-        else if (target is ContentView saveCv)
-            savedContent = saveCv.Content;
-
-        // Clear NameScope so XAML loader can re-register x:Name elements
-        if (target is BindableObject bo)
-            NameScope.SetNameScope(bo, new NameScope());
-
-        // Clear existing content to avoid "already a child" warnings
-        if (target is ContentPage page)
-            page.Content = null;
-        else if (target is ContentView cv)
-            cv.Content = null;
+        SaveViewState(target, out var savedContent, out var savedToolbarItems);
+        ClearViewForReload(target);
 
         try
         {
@@ -1260,12 +2232,10 @@ internal static class XamlHotReloadAgent
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[MauiDeploy] Hot Reload: InitializeComponent failed: {UnwrapException(ex).Message}");
-            // Restore content so fallback strategies work on intact page
-            if (target is ContentPage rp)
-                rp.Content = savedContent;
-            else if (target is ContentView rc)
-                rc.Content = savedContent;
+            var unwrapped = UnwrapException(ex);
+            lastReloadError = $"InitializeComponent threw {unwrapped.GetType().Name}: {unwrapped.Message}";
+            Debug.WriteLine($"[MauiDeploy] Hot Reload: {lastReloadError}");
+            RestoreViewContent(target, savedContent, savedToolbarItems);
             return false;
         }
 
@@ -1317,7 +2287,163 @@ internal static class XamlHotReloadAgent
         }
     }
 
-    private static object CreateReplacement(Type viewType, object target, out object bindingContext)
+    /// <summary>
+    /// Clear all page-level collections so InitializeComponent / XamlLoader can
+    /// re-populate from scratch without NameScope conflicts or "already a child" errors.
+    /// Source gen code and the runtime XAML parser both ADD to collections (ToolbarItems, etc.)
+    /// rather than replacing them, so we must clear first.
+    /// </summary>
+    private static void ClearViewForReload(object target)
+    {
+        // 1. Unregister all x:Name entries from the existing NameScope
+        //    AND clear the internal registration dictionary via reflection.
+        if (target is BindableObject bo)
+        {
+            try
+            {
+                var existingScope = NameScope.GetNameScope(bo) as NameScope;
+                if (existingScope != null)
+                {
+                    // NameScope stores names in an internal dictionary.
+                    // We need to clear it so the parser doesn't see stale registrations.
+                    // Try reflection to clear the internal dictionary.
+                    var internalField = typeof(NameScope).GetField("_names",
+                        BindingFlags.NonPublic | BindingFlags.Instance)
+                        ?? typeof(NameScope).GetField("_names",
+                            BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+
+                    if (internalField != null)
+                    {
+                        var dict = internalField.GetValue(existingScope);
+                        if (dict != null)
+                        {
+                            var clearMethod = dict.GetType().GetMethod("Clear");
+                            clearMethod?.Invoke(dict, null);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[MauiDeploy] Hot Reload: NameScope clear warning: {ex.Message}");
+            }
+        }
+
+        // 2. Clear content and collections BEFORE setting a new NameScope.
+        //    Setting a new NameScope on a live view can trigger auto-registration
+        //    of existing named children, so we remove them beforehand.
+        if (target is ContentPage page)
+        {
+            page.Content = null;
+            try { page.ToolbarItems.Clear(); } catch { }
+            try { if (page.MenuBarItems != null) page.MenuBarItems.Clear(); } catch { }
+        }
+        else if (target is ContentView cv)
+        {
+            cv.Content = null;
+        }
+        else if (target is ScrollView sv)
+        {
+            sv.Content = null;
+        }
+        else if (target is Border border)
+        {
+            border.Content = null;
+        }
+
+        // 3. Also clear Resources — they can hold x:Name references and DataTemplates
+        //    that may conflict on re-parse.
+        if (target is VisualElement ve)
+        {
+            try
+            {
+                // Don't clear app-level resources, only page/view-level
+                if (ve.Resources != null && ve.Resources.Count > 0)
+                    ve.Resources.Clear();
+            }
+            catch { }
+        }
+
+        // 4. Clear Behaviors and Triggers — they may hold named references
+        if (target is VisualElement veTarget)
+        {
+            try { if (veTarget.Behaviors.Count > 0) veTarget.Behaviors.Clear(); } catch { }
+            try { if (veTarget.Triggers.Count > 0) veTarget.Triggers.Clear(); } catch { }
+        }
+
+        // 5. Now set a fresh NameScope so the parser can register x:Name elements cleanly
+        if (target is BindableObject boFinal)
+            NameScope.SetNameScope(boFinal, new NameScope());
+
+        // 6. Also null out any x:Name-backed fields on the target so they don't
+        //    hold stale references. The XAML parser will re-populate them.
+        ClearNamedFields(target);
+    }
+
+    /// <summary>
+    /// Null out all private/internal instance fields that match the naming pattern
+    /// for x:Name-backed code-behind fields (typically the name itself, or prefixed with underscore).
+    /// This prevents stale references and allows the XAML parser to re-assign them cleanly.
+    /// </summary>
+    private static void ClearNamedFields(object target)
+    {
+        try
+        {
+            var type = target.GetType();
+            var fields = type.GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            foreach (var field in fields)
+            {
+                // Skip backing fields for properties, event handlers, and infrastructure
+                if (field.Name.StartsWith("<") || field.Name.StartsWith("_delegate"))
+                    continue;
+
+                // Only clear fields whose type derives from Element (MAUI UI elements)
+                if (!typeof(Element).IsAssignableFrom(field.FieldType))
+                    continue;
+
+                try { field.SetValue(target, null); }
+                catch { }
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Restore content if a reload strategy fails (so subsequent strategies can still work).
+    /// </summary>
+    private static void RestoreViewContent(object target, View savedContent, IList<ToolbarItem> savedToolbarItems)
+    {
+        if (target is ContentPage rp)
+        {
+            rp.Content = savedContent;
+            if (savedToolbarItems != null)
+            {
+                try { rp.ToolbarItems.Clear(); } catch { }
+                foreach (var item in savedToolbarItems)
+                    try { rp.ToolbarItems.Add(item); } catch { }
+            }
+        }
+        else if (target is ContentView rc)
+            rc.Content = savedContent;
+    }
+
+    /// <summary>Save content/toolbar items for rollback on failure.</summary>
+    private static void SaveViewState(object target, out View savedContent, out IList<ToolbarItem> savedToolbarItems)
+    {
+        savedContent = null;
+        savedToolbarItems = null;
+        if (target is ContentPage page)
+        {
+            savedContent = page.Content;
+            savedToolbarItems = page.ToolbarItems.ToList();
+        }
+        else if (target is ContentView cv)
+        {
+            savedContent = cv.Content;
+        }
+    }
+
+    private static object CreateReplacement(Type viewType, object target, string resourcePath, out object bindingContext)
     {
         bindingContext = target is BindableObject targetBindable
             ? targetBindable.BindingContext
@@ -1332,6 +2458,13 @@ internal static class XamlHotReloadAgent
         {
             return null;
         }
+
+        // When source gen is active with EnableMauiXamlDiagnostics=true, the
+        // constructor → InitializeComponent → source gen check → ResourceProvider2
+        // already picks up the cached XAML.  TryReloadViaXamlString is a safety net
+        // for the case where the source gen check missed (e.g. path mismatch or
+        // diagnostics not enabled).
+        TryReloadViaXamlString(replacement, viewType, resourcePath);
 
         if (replacement is BindableObject replacementBindable)
             replacementBindable.BindingContext = bindingContext;
@@ -1421,12 +2554,27 @@ internal static class XamlHotReloadAgent
         switch (target)
         {
             case ContentPage targetPage when source is ContentPage sourcePage:
+                // Move Content
                 var pageContent = sourcePage.Content;
-                if (ReferenceEquals(targetPage.Content, pageContent))
-                    return true;
-                sourcePage.Content = null;
-                targetPage.Content = null;
-                targetPage.Content = pageContent;
+                if (!ReferenceEquals(targetPage.Content, pageContent))
+                {
+                    sourcePage.Content = null;
+                    targetPage.Content = null;
+                    targetPage.Content = pageContent;
+                }
+                // Move ToolbarItems
+                try
+                {
+                    var sourceItems = sourcePage.ToolbarItems.ToList();
+                    sourcePage.ToolbarItems.Clear();
+                    targetPage.ToolbarItems.Clear();
+                    foreach (var item in sourceItems)
+                        targetPage.ToolbarItems.Add(item);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[MauiDeploy] Hot Reload: ToolbarItems move failed: {ex.Message}");
+                }
                 return true;
             case ContentView targetContentView when source is ContentView sourceContentView:
                 var contentViewContent = sourceContentView.Content;
@@ -1538,7 +2686,7 @@ internal static class XamlHotReloadAgent
         }
     }
 
-    private static bool DataTemplateContainsMatchingView(object templateOrSelector, string resourcePath)
+    private static bool DataTemplateContainsMatchingView(object templateOrSelector, string resourcePath, Type targetType)
     {
         try
         {
@@ -1567,7 +2715,7 @@ internal static class XamlHotReloadAgent
 
             // Check the root element
             var contentType = content.GetType();
-            if (IsMatchingXamlView(contentType, resourcePath))
+            if (IsMatchingReloadTarget(contentType, targetType, resourcePath))
             {
                 Debug.WriteLine($"[MauiDeploy] Hot Reload: template probe — root {contentType.Name} matches {Path.GetFileName(resourcePath)}");
                 return true;
@@ -1580,7 +2728,7 @@ internal static class XamlHotReloadAgent
                 foreach (var descendant in EnumerateBindableDescendants(bindableContent, seen))
                 {
                     var descType = descendant.GetType();
-                    if (IsMatchingXamlView(descType, resourcePath))
+                    if (IsMatchingReloadTarget(descType, targetType, resourcePath))
                     {
                         Debug.WriteLine($"[MauiDeploy] Hot Reload: template probe — descendant {descType.Name} (XamlPath='{GetXamlFilePath(descType)}') matches {Path.GetFileName(resourcePath)}");
                         return true;
@@ -1785,6 +2933,59 @@ internal static class XamlHotReloadAgent
 
             pages.Add(window.Page);
 
+            // Shell navigation: walk ShellItems → ShellSections → ShellContents → ContentPage
+            if (window.Page is Shell shell)
+            {
+                try
+                {
+                    foreach (var item in shell.Items)
+                    {
+                        if (item == null) continue;
+                        pages.Add(item);
+                        foreach (var section in item.Items)
+                        {
+                            if (section == null) continue;
+                            pages.Add(section);
+                            foreach (var content in section.Items)
+                            {
+                                if (content == null) continue;
+                                pages.Add(content);
+                                // ShellContent.ContentTemplate may produce a Page
+                                try
+                                {
+                                    var contentPage = content.GetType()
+                                        .GetProperty("ContentCache", BindingFlags.NonPublic | BindingFlags.Instance)?
+                                        .GetValue(content) as Page;
+                                    if (contentPage != null)
+                                        pages.Add(contentPage);
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+
+                    // Also include Shell's currently visible page
+                    if (shell.CurrentPage != null)
+                        pages.Add(shell.CurrentPage);
+
+                    // Walk Shell navigation stack
+                    try
+                    {
+                        foreach (var page in shell.Navigation.NavigationStack)
+                            if (page != null) pages.Add(page);
+                    }
+                    catch { }
+                    try
+                    {
+                        foreach (var modal in shell.Navigation.ModalStack)
+                            if (modal != null) pages.Add(modal);
+                    }
+                    catch { }
+                }
+                catch { }
+                continue;
+            }
+
             INavigation nav = null;
             try { nav = window.Page.Navigation; } catch { }
             if (nav == null)
@@ -1854,6 +3055,77 @@ internal static class XamlHotReloadAgent
             foreach (var descendant in EnumerateBindableDescendants(page, seen))
                 yield return descendant;
         }
+
+        // Presentation services can hold live controls outside the normal MAUI window tree.
+        foreach (var root in GetKnownPresentationRoots())
+        {
+            if (root == null || !seen.Add(root))
+                continue;
+
+            yield return root;
+
+            if (root is not BindableObject bindableRoot)
+                continue;
+
+            foreach (var descendant in EnumerateBindableDescendants(bindableRoot, seen))
+                yield return descendant;
+        }
+    }
+
+    private static IEnumerable<object> GetKnownPresentationRoots()
+    {
+        foreach (var root in GetStaticEnumerableMember(
+            "DIPS.Mobile.UI.Components.BottomSheets.BottomSheetService",
+            "BottomSheetStack"))
+            yield return root;
+    }
+
+    private static IEnumerable<object> GetStaticEnumerableMember(string typeFullName, string memberName)
+    {
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type serviceType;
+            try
+            {
+                serviceType = assembly.GetType(typeFullName, throwOnError: false, ignoreCase: false);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (serviceType == null)
+                continue;
+
+            object value = null;
+            try
+            {
+                var property = serviceType.GetProperty(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                value = property?.GetValue(null);
+            }
+            catch { }
+
+            if (value == null)
+            {
+                try
+                {
+                    var field = serviceType.GetField(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                    value = field?.GetValue(null);
+                }
+                catch { }
+            }
+
+            if (value is not IEnumerable enumerable)
+                yield break;
+
+            foreach (var item in enumerable)
+            {
+                if (item != null)
+                    yield return item;
+            }
+
+            yield break;
+        }
     }
 
     private static IEnumerable<object> EnumerateBindableDescendants(BindableObject root, HashSet<object> seen)
@@ -1910,6 +3182,7 @@ internal static class XamlHotReloadAgent
 export interface BuildResult {
     success: boolean;
     durationMs: number;
+    cancelled?: boolean;
 }
 
 async function runBuildCommand(
@@ -1931,11 +3204,56 @@ async function runBuildCommand(
     ].join(' ');
 
     try {
-        return await runTerminalCommand(terminal, commandFactory(logArgs), timeout, errorLogFile, showBuildErrors, token, onProgress, progressLogFile);
+        const cmd = commandFactory(logArgs);
+        const hasNoRestore = /dotnet build --no-restore /.test(cmd);
+
+        // If --no-restore is present, suppress the error popup on first attempt
+        // so we can silently retry with restore before bothering the user.
+        const result = await runTerminalCommand(
+            terminal, cmd, timeout, errorLogFile,
+            hasNoRestore ? captureFailureSilently : showBuildErrors,
+            token, onProgress, progressLogFile
+        );
+
+        // If build failed and we used --no-restore, always retry with restore
+        if (!result.success && !result.cancelled && hasNoRestore) {
+            try { fs.rmSync(errorLogFile, { force: true }); } catch { }
+            try { fs.rmSync(progressLogFile, { force: true }); } catch { }
+            const retryCmd = cmd.replace(/dotnet build --no-restore /, 'dotnet build ');
+            sendSilent(terminal, `echo '⟳ Retrying with NuGet restore...'`);
+            return await runTerminalCommand(terminal, retryCmd, timeout, errorLogFile, showBuildErrors, token, onProgress, progressLogFile);
+        }
+
+        return result;
     } finally {
         try { fs.rmSync(errorLogFile, { force: true }); } catch { }
         try { fs.rmSync(progressLogFile, { force: true }); } catch { }
     }
+}
+
+/** Capture failure context without showing any UI — used for the first
+ *  --no-restore attempt so we can silently retry with restore. */
+function captureFailureSilently(output: string, exitCode: number | undefined, command: string) {
+    lastBuildFailure = {
+        command,
+        exitCode,
+        errors: extractBuildErrors(output),
+        output,
+        failedAt: new Date(),
+    };
+}
+
+/** Check if build failure was caused by missing NuGet restore. */
+function needsRestore(errorOutput: string): boolean {
+    const markers = [
+        'assets file',
+        'project.assets.json',
+        'run a nuget package restore',
+        'NETSDK1004',
+        'NU1301',
+    ];
+    const lower = errorOutput.toLowerCase();
+    return markers.some(m => lower.includes(m));
 }
 
 async function runTerminalCommand(
@@ -1958,21 +3276,27 @@ async function runTerminalCommand(
     // Write the command to a temp script so the terminal only echoes
     // ". /tmp/script.sh" instead of the entire (very long) build command.
     // The script starts by erasing that echoed line with ANSI escape codes.
+    // A trap ensures Ctrl+C still writes the exit code file (zsh aborts sourced
+    // scripts on SIGINT, so the normal printf after the command wouldn't run).
     const scriptFile = tempFilePath('.sh');
-    const exitCapture = `printf '%s' $? > ${shellQuote(exitCodeFile)}`;
-    fs.writeFileSync(scriptFile, `printf '\x1b[A\x1b[2K'\n${command}\n${exitCapture}\n`, 'utf8');
+    const exitCapture = `printf '%s' $_ec > ${shellQuote(exitCodeFile)}`;
+    const trapLine = `trap 'printf "%s" 130 > ${shellQuote(exitCodeFile)}; trap - INT' INT`;
+    // Save $? into _ec BEFORE `trap - INT` — in zsh, trap is a builtin that
+    // returns 0, so $? would be clobbered if we read it after the trap reset.
+    fs.writeFileSync(scriptFile, `printf '\x1b[A\x1b[2K'\n${trapLine}\n${command}\n_ec=$?; trap - INT\n${exitCapture}\n`, 'utf8');
     terminal.sendText(`. ${shellQuote(scriptFile)}; rm -f ${shellQuote(scriptFile)}`);
-    const exitCode = await waitForExitCodeFile(exitCodeFile, timeout, token, onProgress, progressLogFile);
+    const exitCode = await waitForExitCodeFile(exitCodeFile, timeout, terminal, token, onProgress, progressLogFile);
     const durationMs = Date.now() - started;
     const output = errorLogFile ? readTextFile(errorLogFile) : '';
 
     try { fs.rmSync(exitCodeFile, { force: true }); } catch { }
 
-    if (exitCode !== 0) {
+    const cancelled = exitCode === undefined || exitCode === 130;
+    if (exitCode !== 0 && !cancelled) {
         onFailure(output, exitCode, command);
     }
 
-    return { success: exitCode === 0, durationMs };
+    return { success: exitCode === 0, durationMs, cancelled };
 }
 
 /** MSBuild properties that speed up Android Debug builds by disabling
@@ -1986,13 +3310,26 @@ function androidFastBuildProps(config: string): string[] {
         '-p:AndroidLinkMode=None',
         '-p:AndroidEnableProfiledAot=false',
         '-p:AndroidPackageFormat=apk',
+        '-p:AndroidUseAssemblyStore=false',
+        '-p:AndroidEnableAssemblyCompression=false',
     ];
 }
 
+/** MSBuild properties that speed up iOS physical-device Debug builds by using
+ *  the Mono interpreter instead of full AOT native compilation. */
+function iosFastBuildProps(config: string, deviceType?: 'simulator' | 'physical'): string[] {
+    if (config.toLowerCase() !== 'debug' || deviceType !== 'physical') { return []; }
+    return [
+        '-p:UseInterpreter=true',
+        '-p:MtouchLink=None',
+    ];
+}
+
+let _tempSeq = 0;
 function tempFilePath(suffix: string): string {
     return path.join(
         os.tmpdir(),
-        `mauideploy-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}${suffix}`
+        `mauideploy-${process.pid}-${Date.now()}-${(++_tempSeq).toString(36)}${suffix}`
     );
 }
 
@@ -2035,7 +3372,7 @@ function showBuildErrors(output: string, exitCode: number | undefined, command: 
         } else if (choice === 'Open Build Errors') {
             channel.show(true);
         } else if (choice === 'Open Terminal') {
-            buildTerminal?.show();
+            getBuildTerminal(false).show();
         }
     });
 }
@@ -2046,7 +3383,7 @@ function showTestFailure(_output: string, exitCode: number | undefined) {
         : 'MAUI Deploy: Tests failed.';
     vscode.window.showErrorMessage(message, 'Open Terminal').then(choice => {
         if (choice === 'Open Terminal') {
-            buildTerminal?.show();
+            getBuildTerminal(false).show();
         }
     });
 }
@@ -2190,9 +3527,19 @@ function readTextFile(filePath: string): string {
     try { return fs.readFileSync(filePath, 'utf8'); } catch { return ''; }
 }
 
+function estimateMsBuildLogProgress(logSizeBytes: number): number {
+    if (logSizeBytes <= 0) { return 0; }
+
+    const scaleBytes = 350_000;
+    const saturationBytes = 8_000_000;
+    const normalized = Math.log1p(logSizeBytes / scaleBytes) / Math.log1p(saturationBytes / scaleBytes);
+    return Math.min(82, 82 * normalized);
+}
+
 async function waitForExitCodeFile(
     exitCodeFile: string,
     timeout: number,
+    terminal?: vscode.Terminal,
     token?: vscode.CancellationToken,
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
     progressLogFile?: string
@@ -2207,14 +3554,19 @@ async function waitForExitCodeFile(
                 return;
             }
 
+            // Terminal was closed/killed by the user
+            if (terminal?.exitStatus !== undefined) {
+                clearInterval(timer);
+                resolve(undefined);
+                return;
+            }
+
             if (onProgress) {
                 let buildPercent = -1;
                 if (progressLogFile) {
                     try {
                         const size = fs.statSync(progressLogFile).size;
-                        // Hyperbolic scale driven by detailed MSBuild log file size.
-                        // 150 KB → ~45%, 500 KB → ~69%, 1 MB → ~78%, 2 MB → ~86%
-                        buildPercent = Math.min(90, 90 * size / (size + 200_000));
+                        buildPercent = estimateMsBuildLogProgress(size);
                     } catch { buildPercent = 0; }
                 }
                 onProgress(Date.now() - started, buildPercent);
@@ -2251,7 +3603,10 @@ function shellEnvAssignment(name: string, value: string): string {
 }
 
 export function disposeTerminals() {
-    buildTerminal?.dispose();
+    for (const terminal of buildTerminals.values()) {
+        terminal.dispose();
+    }
+    buildTerminals.clear();
     logTerminal?.dispose();
     buildErrorsOutput?.dispose();
 }

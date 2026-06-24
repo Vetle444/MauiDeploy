@@ -194,7 +194,7 @@ export function isMauiProject(csprojPath: string): boolean {
 
 // ── iOS bundle helpers ─────────────────────────────────
 
-export function findIosAppBundle(csprojPath: string, framework: string, config: string): string | undefined {
+export function findIosAppBundle(csprojPath: string, framework: string, config: string, deviceType?: 'simulator' | 'physical'): string | undefined {
     const projectDir = path.dirname(csprojPath);
     const binDir = path.join(projectDir, 'bin', config, framework);
     if (!fs.existsSync(binDir)) { return undefined; }
@@ -212,7 +212,13 @@ export function findIosAppBundle(csprojPath: string, framework: string, config: 
         } catch { /* permission denied */ }
         return results;
     };
-    return findApps(binDir)[0];
+    const apps = findApps(binDir);
+    if (deviceType === 'simulator') {
+        return apps.find(a => a.includes('iossimulator')) ?? apps[0];
+    } else if (deviceType === 'physical') {
+        return apps.find(a => a.includes('ios-arm64') && !a.includes('simulator')) ?? apps[0];
+    }
+    return apps[0];
 }
 
 export function findAndroidApk(csprojPath: string, framework: string, config: string): string | undefined {

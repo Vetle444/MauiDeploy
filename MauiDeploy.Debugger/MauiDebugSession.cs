@@ -24,14 +24,18 @@ namespace MauiDeploy.Debugger;
 
 public class MauiDebugSession : DebugAdapterBase
 {
-    private readonly SoftDebuggerSession _session = new();
+    private readonly MauiSoftDebuggerSession _session = new();
     private readonly Handles<MonoStackFrame> _frameHandles = new();
     private readonly Handles<Func<ObjectValue[]>> _variableHandles = new();
     private readonly ManualResetEventSlim _targetStoppedSignal = new(false);
+    private readonly ManualResetEventSlim _configDoneSignal = new(false);
     private readonly object _hotReloadInvokeGate = new();
     private LaunchConfig _config = null!;
     private DeviceLauncher? _launcher;
     private long? _lastStoppedThreadId;
+    private int _nextBreakpointId = 1;
+    private int _initializedEventSent;
+    private int _androidSyntheticTargetReadySent;
     private static readonly string LogFile = "/tmp/mauideploy-debug.log";
     private const string XamlHotReloadRequest = "mauideploy.xamlHotReload";
     private const string XamlHotReloadStatusRequest = "mauideploy.xamlHotReloadStatus";
@@ -56,11 +60,14 @@ public class MauiDebugSession : DebugAdapterBase
         };
         _session.LogWriter = (isError, msg) =>
         {
-            if (isError) OnError(msg.Trim());
-            else OnOutput(msg.Trim());
+            var trimmed = msg.Trim();
+            if (string.IsNullOrEmpty(trimmed)) return;
+            Log($"SDB {(isError ? "ERR" : "LOG")}: {trimmed}");
         };
         _session.OutputWriter = (isError, msg) =>
         {
+            if (string.IsNullOrEmpty(msg?.Trim())) return;
+            Log($"SDB OUT: {msg.Trim()}");
             if (isError) OnError(msg);
             else OnOutput(msg);
         };
@@ -77,7 +84,19 @@ public class MauiDebugSession : DebugAdapterBase
         };
         _session.TargetHitBreakpoint += (_, e) =>
         {
-            Log($"TargetHitBreakpoint: thread={e.Thread.Id}");
+            Log($"TargetHitBreakpoint: thread={e.Thread.Id}, backtrace={e.Backtrace?.FrameCount ?? -1} frames");
+            try
+            {
+                if (e.Backtrace?.FrameCount > 0)
+                {
+                    var frame = e.Backtrace.GetFrame(0);
+                    Log($"  top frame: {frame.SourceLocation?.FileName}:{frame.SourceLocation?.Line} ({frame.AddressSpace})");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"  failed to log backtrace: {ex.Message}");
+            }
             RememberStoppedThread(e.Thread.Id);
             ResetHandles();
             Protocol.SendEvent(new StoppedEvent(StoppedEvent.ReasonValue.Breakpoint)
@@ -112,10 +131,46 @@ public class MauiDebugSession : DebugAdapterBase
         };
         _session.TargetReady += (_, _) =>
         {
+            if (System.Threading.Interlocked.Exchange(ref _initializedEventSent, 1) != 0)
+            {
+                Log("TargetReady ignored because InitializedEvent was already sent");
+                return;
+            }
+
             Log("TargetReady fired");
+
+            // Log VM version to diagnose protocol compatibility
+            try
+            {
+                var vm = _session.VirtualMachine;
+                if (vm != null)
+                {
+                    var v = vm.Version;
+                    Log($"VM version: {v.VMVersion} (protocol {v.MajorVersion}.{v.MinorVersion})");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Failed to read VM version: {ex.Message}");
+            }
+
+            // In .NET 10+, calling vm.Suspend() during early runtime init kills the
+            // process (~22 ms after suspend the runtime terminates).  Instead, let the
+            // VM keep running and send InitializedEvent so VS Code configures
+            // breakpoints.  Mono.Debugging resolves pending breakpoints when
+            // assemblies load, so they are set before user code is reached.
             OnOutput("[MauiDeploy] Debug session ready — sending initialized event.");
-            Protocol.SendEvent(new InitializedEvent());
-            Log("InitializedEvent sent");
+            Log("Sending InitializedEvent");
+            try
+            {
+                Protocol.SendEvent(new InitializedEvent());
+                Log("InitializedEvent sent");
+            }
+            catch (Exception ex)
+            {
+                Log($"InitializedEvent send FAILED: {ex}");
+                throw;
+            }
         };
         _session.TargetExited += (_, e) =>
         {
@@ -126,16 +181,23 @@ public class MauiDebugSession : DebugAdapterBase
         _session.TargetThreadStarted += (_, e) =>
         {
             Log($"ThreadStarted: {e.Thread.Id}");
-            Protocol.SendEvent(new ThreadEvent(ThreadEvent.ReasonValue.Started, (int)e.Thread.Id));
+            EnsureAndroidTargetReady($"thread {e.Thread.Id} started");
         };
         _session.TargetThreadStopped += (_, e) =>
         {
             Log($"ThreadStopped: {e.Thread.Id}");
-            Protocol.SendEvent(new ThreadEvent(ThreadEvent.ReasonValue.Exited, (int)e.Thread.Id));
+            EnsureAndroidTargetReady($"thread {e.Thread.Id} stopped");
         };
         _session.Breakpoints.BreakpointStatusChanged += (_, e) =>
+        {
+            if (e.Breakpoint is Mono.Debugging.Client.Breakpoint bp)
+            {
+                var status = bp.GetStatus(_session);
+                Log($"BreakpointStatusChanged: {Path.GetFileName(bp.FileName)}:{bp.Line} → {status}");
+            }
             Protocol.SendEvent(new BreakpointEvent(BreakpointEvent.ReasonValue.Changed,
                 ToBreakpoint(e.Breakpoint)));
+        };
     }
 
     public void Start()
@@ -153,6 +215,7 @@ public class MauiDebugSession : DebugAdapterBase
 
     protected override InitializeResponse HandleInitializeRequest(InitializeArguments arguments)
     {
+        Log("Initialize request received");
         return new InitializeResponse
         {
             SupportsTerminateRequest = true,
@@ -160,6 +223,7 @@ public class MauiDebugSession : DebugAdapterBase
             SupportsHitConditionalBreakpoints = true,
             SupportsLogPoints = true,
             SupportsSetVariable = true,
+            SupportsConfigurationDoneRequest = true,
             ExceptionBreakpointFilters = new List<ExceptionBreakpointsFilter>
             {
                 new() { Filter = "all", Label = "All Exceptions", Default = false }
@@ -174,11 +238,15 @@ public class MauiDebugSession : DebugAdapterBase
         _config = new LaunchConfig(arguments.ConfigurationProperties);
         _launcher = new DeviceLauncher(_config);
 
+        Log($"Launch: platform={_config.Platform}, deviceType={_config.DeviceType}, device={_config.DeviceName}, port={_config.DebugPort}");
+        Log($"Launch: programPath={_config.ProgramPath}");
         OnOutput($"[MauiDeploy] Launching on {_config.DeviceName} ({_config.Platform})...");
 
         // Determine SDB connection mode
         SoftDebuggerStartArgs startArgs;
         bool listensFirst; // true = debugger listens, then we launch app
+        IosSimulatorConnectionProvider? simProvider = null;
+
         if (_config.Platform == "iOS" && _config.DeviceType == "physical")
         {
             // Physical iOS USB: uses mlaunch protocol over iproxy tunnel.
@@ -190,16 +258,21 @@ public class MauiDebugSession : DebugAdapterBase
         }
         else if (_config.Platform == "iOS")
         {
-            // iOS simulator: debugger listens on loopback, app connects to us.
-            // Microsoft.iOS runtime defaults to client mode — it dials
-            // __XAMARIN_DEBUG_HOSTS__:__XAMARIN_DEBUG_PORT__ at startup.
-            startArgs = new SoftDebuggerListenArgs(_config.AppName, IPAddress.Loopback, _config.DebugPort);
+            // iOS simulator: app connects TO us using the Xamarin IDE protocol.
+            // We listen, accept, send "start debugger: sdb", then DWP handshake on same socket.
+            simProvider = new IosSimulatorConnectionProvider(_config.DebugPort,
+                msg => Log($"SimConn: {msg}"));
+            startArgs = new IosSimulatorDebuggerArgs(simProvider);
             listensFirst = true;
         }
         else
         {
-            // Android: debugger listens, app connects to us
-            startArgs = new SoftDebuggerListenArgs(_config.AppName, IPAddress.Loopback, _config.DebugPort);
+            // Android: the Mono SDB agent connects TO us.  DeviceLauncher
+            // sets debug.mono.extra with --debugger-agent=transport=dt_socket,
+            // server=n,address=127.0.0.1:PORT and adb reverse tunnels the
+            // device port back to our host listener.  No IDE protocol, no
+            // 2-second timing window — the agent connects when it's ready.
+            startArgs = new SoftDebuggerListenArgs("MAUI App", IPAddress.Any, _config.DebugPort);
             listensFirst = true;
         }
 
@@ -219,15 +292,53 @@ public class MauiDebugSession : DebugAdapterBase
                 if (listensFirst)
                 {
                     OnOutput($"[MauiDeploy] Listening for debugger connection on port {_config.DebugPort}...");
+                    Log($"Starting SDB listener on port {_config.DebugPort}");
                     _session.Run(startInfo, options);
+                    StartAndroidAttachMonitor();
 
-                    _launcher.Launch(msg => OnOutput($"[MauiDeploy] {msg}"),
-                                     msg => OnError($"[MauiDeploy] {msg}"));
+                    // For iOS simulator, wait for the custom TCP listener to bind
+                    // before launching the app (otherwise the app connects to nothing)
+                    if (simProvider != null)
+                    {
+                        Log("Waiting for simulator listener to bind...");
+                        if (!simProvider.ListenerReady.Wait(5000))
+                            Log("WARNING: timed out waiting for simulator listener");
+                        else
+                            Log("Simulator listener ready");
+                    }
+
+                    Log("Launching app");
+                    _launcher.Launch(msg => { Log($"Launcher: {msg}"); OnOutput($"[MauiDeploy] {msg}"); },
+                                     msg =>
+                                     {
+                                         // Filter noisy iOS runtime stderr (HALC proxy map, etc.)
+                                         if (msg.Contains("HALC_") || msg.Contains("ProxyObjectMap"))
+                                         {
+                                             Log($"Launcher stderr (filtered): {msg}");
+                                             return;
+                                         }
+                                         Log($"Launcher err: {msg}");
+                                         OnOutput($"[MauiDeploy] {msg}");
+                                     });
+                    Log("Launcher.Launch returned");
+
+                    // Log session state periodically (read-only — does NOT connect to the port)
+                    _ = Task.Run(async () =>
+                    {
+                        for (int i = 0; i < 12; i++)
+                        {
+                            await Task.Delay(5000);
+                            if (_config.Platform == "Android" && _session.VirtualMachine != null)
+                                EnsureAndroidTargetReady("SDB virtual machine connected");
+                            Log($"SDB status check #{i + 1}: IsRunning={_session.IsRunning}, IsConnected={_session.IsConnected}, HasExited={_session.HasExited}");
+                            if (_session.IsConnected || _session.HasExited) break;
+                        }
+                    });
                 }
                 else
                 {
                     _launcher.Launch(msg => OnOutput($"[MauiDeploy] {msg}"),
-                                     msg => OnError($"[MauiDeploy] {msg}"));
+                                     msg => OnOutput($"[MauiDeploy] {msg}"));
 
                     OnOutput($"[MauiDeploy] Connecting debugger on port {_config.DebugPort}...");
                     _session.Run(startInfo, options);
@@ -235,6 +346,7 @@ public class MauiDebugSession : DebugAdapterBase
             }
             catch (Exception ex)
             {
+                Log($"Launch FAILED: {ex}");
                 OnError($"[MauiDeploy] Launch failed: {ex.Message}");
                 _launcher?.Dispose();
                 Protocol.SendEvent(new TerminatedEvent());
@@ -244,21 +356,13 @@ public class MauiDebugSession : DebugAdapterBase
         return new LaunchResponse();
     }
 
-    private static SoftDebuggerConnectArgs CreateRetryingConnectArgs(string appName, int debugPort)
-    {
-        return new SoftDebuggerConnectArgs(appName, IPAddress.Loopback, debugPort)
-        {
-            MaxConnectionAttempts = 120,
-            TimeBetweenConnectionAttempts = 500,
-        };
-    }
-
     // ── Configuration Done ─────────────────────────────
 
     protected override ConfigurationDoneResponse HandleConfigurationDoneRequest(
         ConfigurationDoneArguments arguments)
     {
-        Log("ConfigurationDone received");
+        Log("ConfigurationDone received — signaling VM resume");
+        _configDoneSignal.Set();
         return new ConfigurationDoneResponse();
     }
 
@@ -666,7 +770,10 @@ public class MauiDebugSession : DebugAdapterBase
                     breakpoint.TraceExpression = bp.LogMessage;
                 }
 
-                breakpoints.Add(ToBreakpoint(breakpoint));
+                var id = _nextBreakpointId++;
+                var dapBp = ToBreakpoint(breakpoint, id);
+                Log($"  BP #{id}: {Path.GetFileName(sourcePath)}:{bp.Line} verified={dapBp.Verified}");
+                breakpoints.Add(dapBp);
             }
 
             Log($"SetBreakpoints done: {sourcePath}");
@@ -941,6 +1048,63 @@ public class MauiDebugSession : DebugAdapterBase
         });
     }
 
+    private void EnsureAndroidTargetReady(string reason)
+    {
+        if (_config == null || _config.Platform != "Android")
+            return;
+
+        if (System.Threading.Volatile.Read(ref _initializedEventSent) != 0 || _session.IsConnected)
+            return;
+
+        if (System.Threading.Interlocked.Exchange(ref _androidSyntheticTargetReadySent, 1) != 0)
+            return;
+
+        Log($"Synthesizing TargetReady for Android after {reason}; SDB attached without VMStart");
+        _session.MarkStartedFromAttach();
+    }
+
+    private void StartAndroidAttachMonitor()
+    {
+        if (_config.Platform != "Android")
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            var vmSeenAt = DateTime.MinValue;
+            for (int i = 0; i < 240; i++)
+            {
+                await Task.Delay(250);
+
+                if (_session.HasExited || System.Threading.Volatile.Read(ref _initializedEventSent) != 0)
+                    return;
+
+                if (_session.VirtualMachine == null)
+                    continue;
+
+                if (vmSeenAt == DateTime.MinValue)
+                {
+                    vmSeenAt = DateTime.UtcNow;
+                    Log("Android attach monitor: VM object is available; waiting briefly for normal TargetReady");
+                    continue;
+                }
+
+                if ((DateTime.UtcNow - vmSeenAt).TotalMilliseconds >= 1000)
+                {
+                    EnsureAndroidTargetReady("VM connected but TargetReady did not fire");
+                    return;
+                }
+            }
+        });
+    }
+
+    private sealed class MauiSoftDebuggerSession : SoftDebuggerSession
+    {
+        public void MarkStartedFromAttach()
+        {
+            OnStarted();
+        }
+    }
+
     private sealed class XamlHotReloadProtocolRequest : DebugRequestWithResponse<XamlHotReloadArguments, CustomResponseBody>
     {
         public const string RequestType = XamlHotReloadRequest;
@@ -999,11 +1163,14 @@ public class MauiDebugSession : DebugAdapterBase
         _frameHandles.Reset();
     }
 
-    private static DebugProtocol.Breakpoint ToBreakpoint(Mono.Debugging.Client.Breakpoint bp)
+    private DebugProtocol.Breakpoint ToBreakpoint(Mono.Debugging.Client.Breakpoint bp, int id)
     {
+        var status = bp.GetStatus(_session);
+        var verified = status == BreakEventStatus.Bound;
         return new DebugProtocol.Breakpoint
         {
-            Verified = true,
+            Id = id,
+            Verified = verified,
             Line = bp.Line,
             Column = bp.Column,
         };
@@ -1012,7 +1179,7 @@ public class MauiDebugSession : DebugAdapterBase
     private static DebugProtocol.Breakpoint ToBreakpoint(BreakEvent bp)
     {
         if (bp is Mono.Debugging.Client.Breakpoint b)
-            return ToBreakpoint(b);
+            return new DebugProtocol.Breakpoint { Verified = true, Line = b.Line, Column = b.Column };
 
         return new DebugProtocol.Breakpoint { Verified = true };
     }

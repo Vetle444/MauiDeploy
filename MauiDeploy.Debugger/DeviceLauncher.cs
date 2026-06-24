@@ -35,13 +35,11 @@ public class DeviceLauncher : IDisposable
             return;
         }
 
-        // Try mlaunch first (supports debug port natively), fall back to simctl
-        var mlaunchPath = FindMlaunch();
-
-        if (mlaunchPath != null)
-            LaunchIosWithMlaunch(mlaunchPath, onOutput, onError);
-        else
-            LaunchIosWithSimctl(onOutput, onError);
+        // Use simctl directly for simulator launches.  mlaunch internally sets
+        // __XAMARIN_DEBUG_PORT__ / __XAMARIN_DEBUG_HOSTS__ env vars AND passes
+        // -monodevelop-port as an argument, creating a dual-config that makes the
+        // .NET 10 runtime open two debug connections — the second kills the first.
+        LaunchIosWithSimctl(onOutput, onError);
     }
 
     private void LaunchIosWithMlaunch(string mlaunchPath, Action<string> onOutput, Action<string> onError)
@@ -52,8 +50,6 @@ public class DeviceLauncher : IDisposable
         var args = $"--launchsim \"{_config.ProgramPath}\" " +
                    $"--device=:v2:udid={_config.DeviceId} " +
                    $"--argument=-monodevelop-port --argument={_config.DebugPort} " +
-                   $"--setenv=__XAMARIN_DEBUG_PORT__={_config.DebugPort} " +
-                   $"--setenv=__XAMARIN_DEBUG_HOSTS__=127.0.0.1 " +
                    $"--wait-for-exit";
 
         onOutput($"mlaunch {args}");
@@ -106,8 +102,6 @@ public class DeviceLauncher : IDisposable
 
     private void LaunchIosWithSimctl(Action<string> onOutput, Action<string> onError)
     {
-        onOutput("mlaunch not found, using xcrun simctl...");
-
         // Install
         onOutput("Installing app...");
         RunAndWait("xcrun", $"simctl install {_config.DeviceId} \"{_config.ProgramPath}\"", onOutput, onError);
@@ -119,19 +113,21 @@ public class DeviceLauncher : IDisposable
 
         onOutput($"Bundle ID: {bundleId}");
 
-        // Terminate existing instance
-        RunAndWait("xcrun", $"simctl terminate {_config.DeviceId} {bundleId}", onOutput, _ => { });
+        // Terminate existing instance (best-effort — may not be running)
+        try { RunAndWait("xcrun", $"simctl terminate {_config.DeviceId} {bundleId}", _ => { }, _ => { }); }
+        catch { /* not running — fine */ }
 
-        // Launch with debug environment
-        // SIMCTL_CHILD_ prefix sets env vars in the launched process
-        var env = new Dictionary<string, string>
-        {
-            ["SIMCTL_CHILD___XAMARIN_DEBUG_PORT__"] = _config.DebugPort.ToString(),
-        };
-
-        var launchArgs = $"simctl launch {_config.DeviceId} {bundleId} -monodevelop-port {_config.DebugPort}";
+        // Launch with ONLY the -monodevelop-port argument.
+        // Do NOT set SIMCTL_CHILD___XAMARIN_DEBUG_PORT__ / __HOSTS__ env vars —
+        // combining both env-var and argument mechanisms causes the .NET 10 runtime
+        // to open two debug connections, and the second kills the first.
+        var launchArgs = $"simctl launch --console --terminate-running-process " +
+                         $"{_config.DeviceId} {bundleId} " +
+                         $"-monodevelop-port {_config.DebugPort}";
         onOutput($"xcrun {launchArgs}");
-        RunAndWait("xcrun", launchArgs, onOutput, onError, env);
+
+        var process = StartProcess("xcrun", launchArgs, onOutput, onError);
+        _processes.Add(process);
 
         // Give app time to start
         Thread.Sleep(2000);
@@ -143,20 +139,40 @@ public class DeviceLauncher : IDisposable
     {
         var appName = _config.ApplicationId ?? _config.AppName;
 
-        // Install APK
-        onOutput("Installing APK...");
+        // Install APK — can take 30-60s for large MAUI APKs on physical devices
+        var apkSize = new FileInfo(_config.ProgramPath).Length / (1024 * 1024);
+        onOutput($"Installing APK ({apkSize} MB)... this may take a minute on physical devices");
         RunAndWait("adb", $"-s {_config.DeviceId} install -r \"{_config.ProgramPath}\"", onOutput, onError);
+        onOutput("APK installed.");
 
-        // Reverse-tunnel the debug port: device localhost:PORT → host localhost:PORT
-        // (the debugger is already listening on the host side, so adb forward would
-        // collide; adb reverse creates the listener on the device instead).
+        // Force-stop any running instance so the next launch starts fresh.
+        try { RunAndWait("adb", $"-s {_config.DeviceId} shell am force-stop {appName}", _ => { }, _ => { }); }
+        catch { /* might not be running — fine */ }
+
+        // Reverse-tunnel: device localhost:PORT → host localhost:PORT
+        // The SDB agent on the device connects to 127.0.0.1:PORT which
+        // adb tunnels back to our listener on the host.
         try { RunAndWait("adb", $"-s {_config.DeviceId} reverse --remove tcp:{_config.DebugPort}", _ => { }, _ => { }); }
         catch { /* no existing reverse — fine */ }
         RunAndWait("adb", $"-s {_config.DeviceId} reverse tcp:{_config.DebugPort} tcp:{_config.DebugPort}", onOutput, onError);
 
-        // Tell the Mono runtime to connect back to the debugger.
-        // .NET for Android reads debug.mono.extra for the SDB agent options.
-        var agentArgs = $"--debugger-agent=transport=dt_socket,address=127.0.0.1:{_config.DebugPort},server=n,suspend=n";
+        // Clear any stale debug.mono.connect so the runtime doesn't start
+        // its own 2-second IDE-protocol listener (which conflicts with our
+        // --debugger-agent approach below).
+        try { RunAndWait("adb", $"-s {_config.DeviceId} shell setprop debug.mono.connect \"\"", _ => { }, _ => { }); }
+        catch { /* fine */ }
+        // Clear stale debug.mono.extra to avoid leftover args.
+        try { RunAndWait("adb", $"-s {_config.DeviceId} shell setprop debug.mono.extra \"\"", _ => { }, _ => { }); }
+        catch { /* fine */ }
+
+        // Tell the Mono SDB agent to connect TO us.  .NET for Android's
+        // debug.mono.extra property does NOT accept raw --debugger-agent args;
+        // it expects runtime args parsed by monodroid (debug=host:port,
+        // timeout=unixTime,server=n).  Monodroid then builds the debugger-agent
+        // option internally.  The agent connects to 127.0.0.1:PORT on the
+        // device, which adb reverse tunnels to our host listener.
+        var timeout = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 120;
+        var agentArgs = $"debug=127.0.0.1:{_config.DebugPort},timeout={timeout},server=n,loglevel=10";
         RunAndWait("adb", $"-s {_config.DeviceId} shell setprop debug.mono.extra \"{agentArgs}\"", onOutput, onError);
         RunAndWait("adb", $"-s {_config.DeviceId} shell setprop debug.mono.debug 1", onOutput, onError);
 
@@ -190,9 +206,10 @@ public class DeviceLauncher : IDisposable
 
         if (!Directory.Exists(packsDir)) return null;
 
-        // Look for Microsoft.iOS.Sdk.net* packs
+        // Look for Microsoft.iOS.Sdk.net* packs — sort by parsed version
+        // (alphabetical fails: "net9.0" > "net10.0")
         var sdkPaths = Directory.GetDirectories(packsDir, "Microsoft.iOS.Sdk.net*")
-            .OrderByDescending(Path.GetFileName)
+            .OrderByDescending(d => ParseSdkVersion(Path.GetFileName(d)))
             .ToArray();
 
         if (sdkPaths.Length == 0)
@@ -216,6 +233,21 @@ public class DeviceLauncher : IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Parse "Microsoft.iOS.Sdk.netX.Y_Z.W" into a comparable version.
+    /// Returns (major * 1000 + minor) so net10.0 > net9.0.
+    /// </summary>
+    private static int ParseSdkVersion(string dirName)
+    {
+        // e.g. "Microsoft.iOS.Sdk.net10.0_26.4" → extract "10.0"
+        var match = System.Text.RegularExpressions.Regex.Match(dirName, @"net(\d+)\.(\d+)");
+        if (match.Success &&
+            int.TryParse(match.Groups[1].Value, out var major) &&
+            int.TryParse(match.Groups[2].Value, out var minor))
+            return major * 1000 + minor;
+        return 0;
     }
 
     private static string? GetBundleId(string appPath)
@@ -257,10 +289,16 @@ public class DeviceLauncher : IDisposable
         var process = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start {tool}");
 
+        // Read stderr asynchronously to avoid deadlock when both stdout and stderr
+        // buffers fill up (classic .NET Process deadlock).
+        var stderrBuilder = new System.Text.StringBuilder();
+        process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderrBuilder.AppendLine(e.Data); };
+        process.BeginErrorReadLine();
+
         var stdout = process.StandardOutput.ReadToEnd();
-        var stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
 
+        var stderr = stderrBuilder.ToString();
         if (!string.IsNullOrWhiteSpace(stdout)) onOutput(stdout.TrimEnd());
         if (!string.IsNullOrWhiteSpace(stderr)) onError(stderr.TrimEnd());
 
