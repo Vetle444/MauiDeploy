@@ -147,7 +147,6 @@ async function launchIosSimulatorApp(
 
     sendSilent(terminal,
         `xcrun simctl terminate ${device.id} ${bundleId} 2>/dev/null; ` +
-        `xcrun simctl uninstall ${device.id} ${bundleId} 2>/dev/null; ` +
         `echo '▶ Installing...' && xcrun simctl install ${device.id} "${appPath}" && ` +
         `echo '▶ Launching...' && for i in 1 2 3 4 5; do xcrun simctl launch ${device.id} ${bundleId} 2>/dev/null && break; echo "  Retry $i..."; sleep 2; done`
     );

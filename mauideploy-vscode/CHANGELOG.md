@@ -2,6 +2,11 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 1.3.2 - 2026-08-12
+
+### Fixed
+- Preserved iOS simulator app data when redeploying by replacing the installed app instead of uninstalling it first.
+
 ## 1.3.1 - 2026-06-24
 
 ### Fixed
