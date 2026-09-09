@@ -88,20 +88,40 @@ public class DeviceLauncher : IDisposable
             onOutput, onError);
         EnsureIproxyStillRunning(iproxyProcess, "after installing the app");
 
-        // Launch app via devicectl with the console attached.  devicectl stays
-        // alive until the app exits, so start it as a child process instead of
-        // waiting for it to complete; this lets stdout/stderr flow into VS Code
-        // while the Mono debugger attaches through the USB tunnel.
-        onOutput("Launching app on device with console attached...");
-        var launchArgs = $"devicectl device process launch --console --terminate-existing --device {_config.DeviceId} -- {bundleId}";
+        StartIosDeviceLogStream(onOutput, onError);
+
+        // Launch app via devicectl.
+        onOutput("Launching app on device...");
+        var launchArgs = $"devicectl device process launch --device {_config.DeviceId} -- {bundleId}";
         onOutput($"xcrun {launchArgs}");
-        var consoleProcess = StartProcess("xcrun", launchArgs, onOutput, onError);
-        _processes.Add(consoleProcess);
+        RunAndWait("xcrun", launchArgs, onOutput, onError);
         EnsureIproxyStillRunning(iproxyProcess, "after launching the app");
 
         // Brief wait for the app's debug listener to start (it listens on port 10000)
         onOutput("Waiting for app debug listener...");
         Thread.Sleep(500);
+    }
+
+    private void StartIosDeviceLogStream(Action<string> onOutput, Action<string> onError)
+    {
+        var processName = GetBundleExecutable(_config.ProgramPath)
+            ?? Path.GetFileNameWithoutExtension(_config.ProgramPath);
+        if (string.IsNullOrWhiteSpace(processName))
+            return;
+
+        try
+        {
+            var args = $"-u {QuoteArg(_config.DeviceId)} --no-colors -p {QuoteArg(processName)}";
+            onOutput($"Starting iOS device log stream for {processName}...");
+            var logProcess = StartProcess("idevicesyslog", args,
+                line => onOutput($"[iOS log] {line}"),
+                line => onError($"[iOS log] {line}"));
+            _processes.Add(logProcess);
+        }
+        catch (Exception ex)
+        {
+            onOutput($"iOS device logs unavailable: {ex.Message}");
+        }
     }
 
     private void LaunchIosWithSimctl(Action<string> onOutput, Action<string> onError)
@@ -143,11 +163,20 @@ public class DeviceLauncher : IDisposable
     {
         var appName = _config.ApplicationId ?? _config.AppName;
 
-        // Install APK — can take 30-60s for large MAUI APKs on physical devices
-        var apkSize = new FileInfo(_config.ProgramPath).Length / (1024 * 1024);
-        onOutput($"Installing APK ({apkSize} MB)... this may take a minute on physical devices");
-        RunAndWait("adb", $"-s {_config.DeviceId} install -r \"{_config.ProgramPath}\"", onOutput, onError);
-        onOutput("APK installed.");
+        if (!_config.AndroidAlreadyInstalled)
+        {
+            var installTimer = Stopwatch.StartNew();
+            var apkSize = new FileInfo(_config.ProgramPath).Length / (1024 * 1024);
+            onOutput($"Installing APK ({apkSize} MB)...");
+            RunAndWait("adb", $"-s {_config.DeviceId} install -r \"{_config.ProgramPath}\"", onOutput, onError);
+            onOutput($"APK install: {installTimer.ElapsedMilliseconds} ms");
+        }
+        else
+        {
+            onOutput("Using app installed by the Android SDK deploy step.");
+        }
+
+        var launchTimer = Stopwatch.StartNew();
 
         // Force-stop any running instance so the next launch starts fresh.
         try { RunAndWait("adb", $"-s {_config.DeviceId} shell am force-stop {appName}", _ => { }, _ => { }); }
@@ -183,6 +212,7 @@ public class DeviceLauncher : IDisposable
         // Launch
         onOutput("Launching app...");
         RunAndWait("adb", $"-s {_config.DeviceId} shell monkey -p {appName} 1", onOutput, onError);
+        onOutput($"Android launch (including debugger setup): {launchTimer.ElapsedMilliseconds} ms");
 
         // Start logcat
         var logcat = StartProcess("adb", $"-s {_config.DeviceId} logcat -s dotnet mono-rt Mono", onOutput, onError);
@@ -272,6 +302,31 @@ public class DeviceLauncher : IDisposable
             return string.IsNullOrEmpty(output) ? null : output;
         }
         catch { return null; }
+    }
+
+    private static string? GetBundleExecutable(string appPath)
+    {
+        var plistPath = Path.Combine(appPath, "Info.plist");
+        if (!File.Exists(plistPath)) return null;
+
+        try
+        {
+            var psi = new ProcessStartInfo("/usr/libexec/PlistBuddy", $"-c \"Print :CFBundleExecutable\" \"{plistPath}\"")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+            };
+            var p = Process.Start(psi);
+            var output = p?.StandardOutput.ReadToEnd().Trim();
+            p?.WaitForExit();
+            return string.IsNullOrEmpty(output) ? null : output;
+        }
+        catch { return null; }
+    }
+
+    private static string QuoteArg(string value)
+    {
+        return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
     }
 
     private static void RunAndWait(string tool, string args, Action<string> onOutput, Action<string> onError,

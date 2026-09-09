@@ -2,7 +2,13 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { Platform, Device, findIosAppBundle, findAndroidApk, getAndroidPackageId, getBundleId } from './devices';
+import { createHash } from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { Platform, Device, findIosAppBundle, findAndroidApk, getAndroidPackageId, getBundleId, getAndroidRuntimeIdentifier } from './devices';
+import { AndroidBuildOptions, androidBuildProperties, androidDeploymentTargets, androidPhaseTimings } from './androidBuild';
+
+const execFileAsync = promisify(execFile);
 
 export const DEFAULT_XAML_HOT_RELOAD_PORT = 55438;
 
@@ -20,6 +26,7 @@ interface BuildFailureContext {
 }
 
 let lastBuildFailure: BuildFailureContext | undefined;
+const projectBuilds = new Map<string, Promise<void>>();
 
 function getBuildTerminal(fresh = true, name = defaultBuildTerminalName): vscode.Terminal {
     const existing = buildTerminals.get(name);
@@ -60,12 +67,26 @@ export async function buildAndDeploy(
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
     terminalName?: string
 ): Promise<BuildResult> {
-    if (platform.name === 'iOS') {
-        return device.type === 'physical'
-            ? buildAndDeployIosDevice(projectPath, platform, device, config, token, onProgress, terminalName)
-            : buildAndDeployIos(projectPath, platform, device, config, token, onProgress, terminalName);
+    const projectKey = path.resolve(projectPath);
+    const previous = projectBuilds.get(projectKey) ?? Promise.resolve();
+    const build = previous.then(() => {
+        if (token?.isCancellationRequested) {
+            return { success: false, cancelled: true, durationMs: 0 };
+        }
+        if (platform.name === 'iOS') {
+            return device.type === 'physical'
+                ? buildAndDeployIosDevice(projectPath, platform, device, config, token, onProgress, terminalName)
+                : buildAndDeployIos(projectPath, platform, device, config, token, onProgress, terminalName);
+        }
+        return buildAndDeployAndroid(projectPath, platform, device, config, token, onProgress, terminalName);
+    });
+    const completion = build.then(() => {}, () => {});
+    projectBuilds.set(projectKey, completion);
+    try {
+        return await build;
+    } finally {
+        if (projectBuilds.get(projectKey) === completion) { projectBuilds.delete(projectKey); }
     }
-    return buildAndDeployAndroid(projectPath, platform, device, config, token, onProgress, terminalName);
 }
 
 export async function deployFromBin(
@@ -97,8 +118,10 @@ async function buildAndDeployIos(
 
     const shared = sharedBuildProps(projectPath);
     const noRestore = restoreFlag(projectPath);
-    const result = await runBuildCommand(terminal, logArgs => {
-        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${shared} ${logArgs}`;
+    const started = Date.now();
+    const result = await runIosBuildCommand(terminal, projectPath, logArgs => {
+        const fastProps = iosFastBuildProps(projectPath, config, 'simulator').join(' ');
+        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${fastProps} ${shared} ${logArgs}`;
         return `echo '▶ Building...' && ${buildCmd}`;
     }, 600_000, token, onProgress);
     if (!result.success) {
@@ -108,11 +131,13 @@ async function buildAndDeployIos(
     const appPath = findIosAppBundle(projectPath, platform.framework, config, 'simulator');
     if (!appPath) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not find .app bundle.');
-        return result;
+        return { ...result, success: false };
     }
 
-    await launchIosSimulatorApp(terminal, appPath, device);
-    return result;
+    const launch = await launchIosSimulatorApp(terminal, appPath, device, token);
+    const durationMs = Date.now() - started;
+    reportIosTiming(`Run total ${device.name}: ${durationMs} ms | Success: ${launch.success}`);
+    return { ...result, ...launch, durationMs };
 }
 
 async function launchIosSimulatorFromBin(
@@ -131,27 +156,28 @@ async function launchIosSimulatorFromBin(
         return false;
     }
 
-    return launchIosSimulatorApp(terminal, appPath, device);
+    return (await launchIosSimulatorApp(terminal, appPath, device)).success;
 }
 
 async function launchIosSimulatorApp(
     terminal: vscode.Terminal,
     appPath: string,
-    device: Device
-): Promise<boolean> {
+    device: Device,
+    token?: vscode.CancellationToken
+): Promise<BuildResult> {
     const bundleId = await getBundleId(appPath);
     if (!bundleId) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not determine bundle ID.');
-        return false;
+        return { success: false, durationMs: 0 };
     }
 
-    sendSilent(terminal,
-        `xcrun simctl terminate ${device.id} ${bundleId} 2>/dev/null; ` +
-        `echo '▶ Installing...' && xcrun simctl install ${device.id} "${appPath}" && ` +
-        `echo '▶ Launching...' && for i in 1 2 3 4 5; do xcrun simctl launch ${device.id} ${bundleId} 2>/dev/null && break; echo "  Retry $i..."; sleep 2; done`
-    );
-
-    return true;
+    const install = await runIosPhase(terminal, 'Install',
+        `xcrun simctl terminate ${shellQuote(device.id)} ${shellQuote(bundleId)} 2>/dev/null; ` +
+        `xcrun simctl install ${shellQuote(device.id)} ${shellQuote(appPath)}`, token);
+    if (!install.success) { return install; }
+    const launch = await runIosPhase(terminal, 'Launch',
+        `xcrun simctl launch ${shellQuote(device.id)} ${shellQuote(bundleId)}`, token, 5);
+    return { ...launch, durationMs: install.durationMs + launch.durationMs };
 }
 
 async function buildAndDeployIosDevice(
@@ -169,8 +195,8 @@ async function buildAndDeployIosDevice(
     // Build for physical device (needs RuntimeIdentifier ios-arm64)
     const shared = sharedBuildProps(projectPath);
     const noRestore = restoreFlag(projectPath);
-    const fastProps = iosFastBuildProps(config, 'physical').join(' ');
-    const result = await runBuildCommand(terminal, logArgs => {
+    const started = Date.now();
+    const result = await runIosPhysicalBuild(terminal, projectPath, platform.framework, config, (logArgs, fastProps) => {
         const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -r ios-arm64 ${fastProps} ${shared} ${logArgs}`;
         return `echo '▶ Building for device...' && ${buildCmd}`;
     }, 600_000, token, onProgress);
@@ -181,11 +207,13 @@ async function buildAndDeployIosDevice(
     const appPath = findIosAppBundle(projectPath, platform.framework, config, 'physical');
     if (!appPath) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not find .app bundle.');
-        return result;
+        return { ...result, success: false };
     }
 
-    await launchIosDeviceApp(terminal, appPath, device);
-    return result;
+    const launch = await launchIosDeviceApp(terminal, appPath, device, token);
+    const durationMs = Date.now() - started;
+    reportIosTiming(`Run total ${device.name}: ${durationMs} ms | Success: ${launch.success}`);
+    return { ...result, ...launch, durationMs };
 }
 
 async function launchIosDeviceFromBin(
@@ -204,31 +232,130 @@ async function launchIosDeviceFromBin(
         return false;
     }
 
-    return launchIosDeviceApp(terminal, appPath, device);
+    return (await launchIosDeviceApp(terminal, appPath, device)).success;
 }
 
 async function launchIosDeviceApp(
     terminal: vscode.Terminal,
     appPath: string,
-    device: Device
-): Promise<boolean> {
+    device: Device,
+    token?: vscode.CancellationToken
+): Promise<BuildResult> {
     const bundleId = await getBundleId(appPath);
     if (!bundleId) {
         vscode.window.showErrorMessage('MAUI Deploy: Could not determine bundle ID.');
-        return false;
+        return { success: false, durationMs: 0 };
     }
 
-    // Install via devicectl
-    sendSilent(terminal,
-        `echo '▶ Installing on device...' && xcrun devicectl device install app --device ${device.id} "${appPath}"`
-    );
+    const install = await runIosPhase(terminal, 'Install',
+        `xcrun devicectl device install app --device ${shellQuote(device.id)} ${shellQuote(appPath)}`, token);
+    if (!install.success) { return install; }
+    const launch = await runIosPhase(terminal, 'Launch',
+        `xcrun devicectl device process launch --device ${shellQuote(device.id)} ${shellQuote(bundleId)}`, token);
+    return { ...launch, durationMs: install.durationMs + launch.durationMs };
+}
 
-    // Launch via devicectl
-    sendSilent(terminal,
-        `echo '▶ Launching...' && xcrun devicectl device process launch --device ${device.id} ${bundleId}`
-    );
+let iosTimingOutput: vscode.OutputChannel | undefined;
 
-    return true;
+function reportIosTiming(message: string): void {
+    iosTimingOutput ??= vscode.window.createOutputChannel('MAUI Deploy - iOS Performance');
+    iosTimingOutput.appendLine(`${new Date().toISOString()} ${message}`);
+}
+
+async function runIosPhase(
+    terminal: vscode.Terminal,
+    phase: 'Install' | 'Launch',
+    command: string,
+    token?: vscode.CancellationToken,
+    attempts = 1
+): Promise<BuildResult> {
+    const started = Date.now();
+    for (let attempt = 1; ; attempt++) {
+        const onFailure = attempt < attempts ? captureFailureSilently : showBuildErrors;
+        const result = await runTerminalCommand(terminal, command, 120_000, undefined, onFailure, token);
+        if (result.success || result.cancelled || attempt >= attempts) {
+            const durationMs = Date.now() - started;
+            reportIosTiming(`${phase}: ${durationMs} ms | Success: ${result.success} | Cancelled: ${!!result.cancelled}`);
+            return { ...result, durationMs };
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+}
+
+async function runIosBuildCommand(
+    terminal: vscode.Terminal,
+    projectPath: string,
+    commandFactory: (logArgs: string) => string,
+    timeout: number,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
+    const settings = vscode.workspace.getConfiguration('mauideploy', vscode.Uri.file(projectPath));
+    const collectBinlog = settings.get<boolean>('ios.collectBinlogs', false);
+    const binlogFile = tempFilePath('.ios.binlog');
+    const started = Date.now();
+    reportIosTiming(`Build ${projectPath}`);
+    const result = await runBuildCommand(terminal, logArgs => commandFactory([
+        logArgs,
+        collectBinlog ? shellQuote(`-bl:${binlogFile};ProjectImports=None`) : ''
+    ].join(' ')), timeout, token, onProgress);
+    const durationMs = Date.now() - started;
+    reportIosTiming(`Build/restore: ${durationMs} ms | Success: ${result.success}`);
+    if (collectBinlog) { reportIosTiming(`Local binlog (may contain sensitive data): ${binlogFile}`); }
+    return { ...result, durationMs };
+}
+
+async function runIosPhysicalBuild(
+    terminal: vscode.Terminal,
+    projectPath: string,
+    framework: string,
+    config: string,
+    commandFactory: (logArgs: string, fastProps: string) => string,
+    timeout: number,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void
+): Promise<BuildResult> {
+    const started = Date.now();
+    const settings = vscode.workspace.getConfiguration('mauideploy', vscode.Uri.file(projectPath));
+    const isDebug = config.toLowerCase() === 'debug';
+    const dynamic = isDebug && settings.get<boolean>('ios.useDynamicRegistrar', true);
+    const properties = iosFastBuildProps(projectPath, config, 'physical');
+    if (dynamic) { properties.push('-p:Registrar=dynamic'); }
+    const mode = dynamic ? 'dynamic' : 'project';
+    const key = createHash('sha256').update(JSON.stringify([path.resolve(projectPath), framework, config])).digest('hex');
+    const stateFile = path.join(os.tmpdir(), 'mauideploy-ios-registrar', `${key}.txt`);
+    let modeChanged = false;
+
+    if (isDebug) {
+        try {
+            const previous = fs.existsSync(stateFile) ? fs.readFileSync(stateFile, 'utf8') : undefined;
+            modeChanged = previous !== mode;
+            if (modeChanged) {
+                fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+                fs.writeFileSync(stateFile, 'pending');
+                reportIosTiming(`Registrar changed or unknown; cleaning ${config} ${framework} ios-arm64 output for ${mode} mode.`);
+                const clean = await runTerminalCommand(terminal,
+                    `dotnet clean ${shellQuote(projectPath)} -f ${shellQuote(framework)} -c ${shellQuote(config)} -r ios-arm64 ${properties.join(' ')}`,
+                    timeout, undefined, showBuildErrors, token);
+                if (!clean.success) { return clean; }
+            }
+        } catch (error) {
+            vscode.window.showErrorMessage(`MAUI Deploy: Could not prepare iOS registrar state: ${error}`);
+            return { success: false, durationMs: Date.now() - started };
+        }
+    }
+
+    const result = await runIosBuildCommand(terminal, projectPath,
+        logArgs => commandFactory(logArgs, properties.join(' ')), timeout, token, onProgress);
+    if (result.success && modeChanged) {
+        try {
+            fs.writeFileSync(stateFile, mode);
+        } catch (error) {
+            vscode.window.showErrorMessage(`MAUI Deploy: Could not save iOS registrar state: ${error}`);
+            return { ...result, success: false, durationMs: Date.now() - started };
+        }
+    }
+    return { ...result, durationMs: Date.now() - started };
 }
 
 async function buildAndDeployAndroid(
@@ -243,21 +370,94 @@ async function buildAndDeployAndroid(
     const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
-    return runBuildCommand(terminal, logArgs => {
-        const shared = sharedBuildProps(projectPath);
-        const noRestore = restoreFlag(projectPath);
-        const buildCmd = [
-            `dotnet build ${noRestore} "${projectPath}"`,
-            `-t:Run`,
-            `-f ${platform.framework}`,
-            `-c ${config}`,
-            `/p:AdbTarget="-s ${device.id}"`,
-            shared,
+    const result = await buildAndInstallAndroid(terminal, projectPath, platform, device.id, config, token, onProgress);
+    if (!result.success) { return result; }
+    const packageId = getAndroidPackageId(projectPath);
+    if (!packageId) {
+        vscode.window.showErrorMessage('MAUI Deploy: Could not determine Android package ID.');
+        return { ...result, success: false };
+    }
+    const started = Date.now();
+    const adb = `adb -s ${shellQuote(device.id)}`;
+    const launch = await runTerminalCommand(terminal,
+        `${adb} shell am force-stop ${shellQuote(packageId)} && ` +
+        `${adb} shell setprop debug.mono.extra '\"\"' && ` +
+        `${adb} shell setprop debug.mono.connect '\"\"' && ` +
+        `${adb} shell setprop debug.mono.debug 0 && ` +
+        `${adb} shell monkey -p ${shellQuote(packageId)} -c android.intent.category.LAUNCHER 1`,
+        60_000, undefined, showBuildErrors, token);
+    reportAndroidTiming(`Launch ${device.name}: ${Date.now() - started} ms`);
+    return { ...result, success: launch.success, cancelled: launch.cancelled, durationMs: result.durationMs + launch.durationMs };
+}
+
+let androidTimingOutput: vscode.OutputChannel | undefined;
+
+function reportAndroidTiming(message: string): void {
+    androidTimingOutput ??= vscode.window.createOutputChannel('MAUI Deploy - Android Performance');
+    androidTimingOutput.appendLine(`${new Date().toISOString()} ${message}`);
+}
+
+async function buildAndInstallAndroid(
+    terminal: vscode.Terminal,
+    projectPath: string,
+    platform: Platform,
+    deviceId: string,
+    config: string,
+    token?: vscode.CancellationToken,
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    hotReloadPort = DEFAULT_XAML_HOT_RELOAD_PORT
+): Promise<BuildResult> {
+    const settings = vscode.workspace.getConfiguration('mauideploy', vscode.Uri.file(projectPath));
+    const runtimeIdentifier = config.toLowerCase() === 'debug' ? await getAndroidRuntimeIdentifier(deviceId) : undefined;
+    const options: AndroidBuildOptions = {
+        framework: platform.framework,
+        configuration: config,
+        runtimeIdentifier,
+        fastDeployment: settings.get<boolean>('android.fastDeployment', true),
+        forceReinstall: settings.get<boolean>('android.forceReinstall', false),
+        skipCompatibilityAnalyzers: settings.get<boolean>('android.skipCompatibilityAnalyzers', true)
+    };
+    const properties = androidBuildProperties(options);
+    const targetsPath = path.join(os.tmpdir(), 'mauideploy-android.targets');
+    writeIfChanged(targetsPath, androidDeploymentTargets());
+    const timingFile = tempFilePath('.android-timing');
+    const binlogFile = tempFilePath('.android.binlog');
+    const collectBinlog = settings.get<boolean>('android.collectBinlogs', false);
+    const shared = sharedBuildProps(projectPath, hotReloadPort);
+    const started = Date.now();
+    reportAndroidTiming(`Build/install ${path.basename(projectPath)} | ${deviceId} | ${config} | ${runtimeIdentifier ?? 'project architectures'}`);
+    try {
+        const result = await runBuildCommand(terminal, logArgs => [
+            `dotnet build ${shellQuote(projectPath)} -t:Install`,
+            `-f ${platform.framework} -c ${config}`,
+            shellQuote(`-p:AdbTarget=-s ${deviceId}`),
+            shellQuote(`-p:MauiDeployAndroidTargets=${targetsPath}`),
+            shellQuote(`-p:MauiDeployTimingFile=${timingFile}`),
+            ...properties,
             ...androidFastBuildProps(config),
+            shared,
+            collectBinlog ? shellQuote(`-bl:${binlogFile};ProjectImports=None`) : '',
             logArgs
-        ].join(' ');
-        return `echo '▶ Building & deploying...' && ${buildCmd}`;
-    }, 600_000, token, onProgress);
+        ].join(' '), 600_000, token, onProgress);
+        const finished = Date.now();
+        const timings = androidPhaseTimings(started, finished, readTextFile(timingFile));
+        if (timings) {
+            reportAndroidTiming(`Build/restore: ${timings.buildMs} ms | Deploy: ${timings.deployMs} ms | Total: ${finished - started} ms | Success: ${result.success}`);
+        } else {
+            reportAndroidTiming(`Build/install total: ${finished - started} ms | Success: ${result.success}`);
+        }
+        if (collectBinlog) { reportAndroidTiming(`Local binlog (may contain sensitive data): ${binlogFile}`); }
+        if (result.success) {
+            const apkPath = findAndroidApk(projectPath, platform.framework, config, runtimeIdentifier);
+            if (apkPath) {
+                const metadata: AndroidArtifact = { version: 1, projectPath, options, hotReloadPort, apkHash: await hashFile(apkPath) };
+                fs.writeFileSync(`${apkPath}.mauideploy.json`, JSON.stringify(metadata), 'utf8');
+            }
+        }
+        return { ...result, runtimeIdentifier, androidInstalled: result.success };
+    } finally {
+        try { fs.rmSync(timingFile, { force: true }); } catch { }
+    }
 }
 
 async function launchAndroidFromBin(
@@ -270,7 +470,8 @@ async function launchAndroidFromBin(
     const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
-    const apkPath = findAndroidApk(projectPath, platform.framework, config);
+    const runtimeIdentifier = await getAndroidRuntimeIdentifier(device.id);
+    const apkPath = findAndroidApk(projectPath, platform.framework, config, runtimeIdentifier);
     if (!apkPath) {
         vscode.window.showErrorMessage(`MAUI Deploy: Could not find a ${config} APK in bin/${config}/${platform.framework}. Build the app first.`);
         return false;
@@ -282,11 +483,96 @@ async function launchAndroidFromBin(
         return false;
     }
 
-    sendSilent(terminal,
-        `echo '▶ Installing APK...' && adb -s ${device.id} install -r "${apkPath}" && ` +
-        `echo '▶ Launching...' && adb -s ${device.id} shell monkey -p ${packageId} 1`
-    );
+    const settings = vscode.workspace.getConfiguration('mauideploy', vscode.Uri.file(projectPath));
+    const forceReinstall = settings.get<boolean>('android.forceReinstall', false);
+    const started = Date.now();
+    const artifact = await readAndroidArtifact(apkPath, projectPath, platform.framework, config);
+    if (fs.existsSync(`${apkPath}.mauideploy.json`) && !artifact) {
+        vscode.window.showErrorMessage('MAUI Deploy: Android build metadata is stale. Use Run or Debug before deploying from bin.');
+        return false;
+    }
+    if (artifact) {
+        const targetsPath = path.join(os.tmpdir(), 'mauideploy-android.targets');
+        writeIfChanged(targetsPath, androidDeploymentTargets());
+        const result = await runTerminalCommand(terminal, [
+            `dotnet build --no-restore ${shellQuote(projectPath)} -t:_Upload`,
+            `-f ${platform.framework} -c ${config}`,
+            '-p:BuildProjectReferences=false -p:MauiDeployFromBin=true',
+            shellQuote(`-p:AdbTarget=-s ${device.id}`),
+            shellQuote(`-p:MauiDeployAndroidTargets=${targetsPath}`),
+            ...androidBuildProperties({ ...artifact.options, forceReinstall }),
+            ...androidFastBuildProps(config),
+            sharedBuildProps(projectPath, artifact.hotReloadPort)
+        ].join(' '));
+        if (!result.success) { return false; }
+    } else {
+        if (!await installStandaloneAndroidApk(terminal, apkPath, device.id, packageId, forceReinstall)) { return false; }
+    }
+    reportAndroidTiming(`Deploy from bin ${device.name}: ${Date.now() - started} ms`);
+    const adb = `adb -s ${shellQuote(device.id)}`;
+    const launch = await runTerminalCommand(terminal,
+        `${adb} shell am force-stop ${shellQuote(packageId)} && ` +
+        `${adb} shell setprop debug.mono.extra '\"\"' && ` +
+        `${adb} shell setprop debug.mono.connect '\"\"' && ` +
+        `${adb} shell setprop debug.mono.debug 0 && ` +
+        `${adb} shell monkey -p ${shellQuote(packageId)} -c android.intent.category.LAUNCHER 1`, 60_000);
+    reportAndroidTiming(`Launch ${device.name}: ${launch.durationMs} ms`);
+    return launch.success;
+}
 
+interface AndroidArtifact {
+    version: number;
+    projectPath: string;
+    options: AndroidBuildOptions;
+    hotReloadPort: number;
+    apkHash: string;
+}
+
+async function hashFile(filePath: string): Promise<string> {
+    const hash = createHash('sha256');
+    for await (const chunk of fs.createReadStream(filePath)) { hash.update(chunk); }
+    return hash.digest('hex');
+}
+
+async function readAndroidArtifact(apkPath: string, projectPath: string, framework: string, config: string): Promise<AndroidArtifact | undefined> {
+    try {
+        const artifact: AndroidArtifact = JSON.parse(fs.readFileSync(`${apkPath}.mauideploy.json`, 'utf8'));
+        if (artifact.version !== 1 || artifact.projectPath !== projectPath || artifact.apkHash !== await hashFile(apkPath)) { return undefined; }
+        if (artifact.options.framework !== framework || artifact.options.configuration !== config) { return undefined; }
+        if (typeof artifact.options.fastDeployment !== 'boolean') { return undefined; }
+        if (!Number.isInteger(artifact.hotReloadPort) || artifact.hotReloadPort < 1 || artifact.hotReloadPort > 65535) { return undefined; }
+        if (artifact.options.runtimeIdentifier && !['android-arm64', 'android-arm', 'android-x64', 'android-x86'].includes(artifact.options.runtimeIdentifier)) { return undefined; }
+        return artifact;
+    } catch { return undefined; }
+}
+
+const installedAndroidApks = new Map<string, { hash: string; identity: string }>();
+
+async function installedAndroidIdentity(deviceId: string, packageId: string): Promise<string | undefined> {
+    try {
+        const { stdout: location } = await execFileAsync('adb', ['-s', deviceId, 'shell', 'pm', 'path', packageId], { timeout: 5000 });
+        if (!location.trim().startsWith('package:')) { return undefined; }
+        const { stdout } = await execFileAsync('adb', ['-s', deviceId, 'shell', 'dumpsys', 'package', packageId], { timeout: 5000 });
+        const identity = stdout.split(/\r?\n/).filter(line => /^\s*(firstInstallTime|lastUpdateTime|versionCode)=/.test(line)).join('\n');
+        if (!identity) { return undefined; }
+        return `${location.trim()}\n${identity}`;
+    } catch { return undefined; }
+}
+
+async function installStandaloneAndroidApk(terminal: vscode.Terminal, apkPath: string, deviceId: string, packageId: string, forceReinstall: boolean): Promise<boolean> {
+    const hash = await hashFile(apkPath);
+    const key = JSON.stringify([deviceId, packageId]);
+    const previous = installedAndroidApks.get(key);
+    const identity = await installedAndroidIdentity(deviceId, packageId);
+    if (!forceReinstall && previous?.hash === hash && identity && previous.identity === identity) {
+        reportAndroidTiming(`Reusing unchanged APK on ${deviceId}`);
+        return true;
+    }
+    installedAndroidApks.delete(key);
+    const result = await runTerminalCommand(terminal, `adb -s ${shellQuote(deviceId)} install -r ${shellQuote(apkPath)}`);
+    if (!result.success) { return false; }
+    const installedIdentity = await installedAndroidIdentity(deviceId, packageId);
+    if (installedIdentity) { installedAndroidApks.set(key, { hash, identity: installedIdentity }); }
     return true;
 }
 
@@ -384,19 +670,30 @@ export async function buildForDebug(
     deviceType?: 'simulator' | 'physical',
     token?: vscode.CancellationToken,
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
-    hotReloadPort = DEFAULT_XAML_HOT_RELOAD_PORT
+    hotReloadPort = DEFAULT_XAML_HOT_RELOAD_PORT,
+    androidDeviceId?: string
 ): Promise<BuildResult> {
     const terminal = getBuildTerminal(false);
     terminal.show();
 
+    if (platform.name === 'Android' && androidDeviceId) {
+        return buildAndInstallAndroid(terminal, projectPath, platform, androidDeviceId, config, token, onProgress, hotReloadPort);
+    }
+
     // Build with debug flags — MtouchDebug=true enables Mono SDB in iOS apps
     const extraProps = platform.name === 'iOS'
-        ? `-p:MtouchDebug=true ${iosFastBuildProps(config, deviceType).join(' ')}`
+        ? `-p:MtouchDebug=true ${iosFastBuildProps(projectPath, config, deviceType).join(' ')}`
         : `-p:EmbedAssembliesIntoApk=true ${androidFastBuildProps(config).join(' ')}`;
 
     const shared = sharedBuildProps(projectPath, hotReloadPort);
     const noRestore = restoreFlag(projectPath);
     const rid = platform.name === 'iOS' && deviceType === 'physical' ? ' -r ios-arm64' : '';
+    if (platform.name === 'iOS' && deviceType === 'physical') {
+        return runIosPhysicalBuild(terminal, projectPath, platform.framework, config, (logArgs, fastProps) => {
+            const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -p:MtouchDebug=true ${fastProps}${rid} ${shared} ${logArgs}`;
+            return `echo 'Building for debug...' && ${buildCmd}`;
+        }, 600_000, token, onProgress);
+    }
     return runBuildCommand(terminal, logArgs => {
         const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${extraProps}${rid} ${shared} ${logArgs}`;
         return `echo '▶ Building for debug...' && ${buildCmd} && echo '✅ BUILD_DONE'`;
@@ -739,6 +1036,7 @@ function writeIfChanged(filePath: string, content: string) {
 function hotReloadAgentTargets(): string {
     return `<?xml version="1.0" encoding="utf-8"?>
 <Project>
+    <Import Project="$(MauiDeployAndroidTargets)" Condition="'$(MauiDeployAndroidTargets)' != '' and '$(MSBuildProjectFullPath)' == '$(MauiDeployHotReloadTargetProject)' and $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'" />
     <ItemGroup Condition="'$(MauiDeployHotReloadAgentSource)' != '' and '$(MSBuildProjectFullPath)' == '$(MauiDeployHotReloadTargetProject)'">
     <Compile Include="$(MauiDeployHotReloadAgentSource)" Link="MauiDeploy.HotReloadAgent.g.cs" Visible="false" />
   </ItemGroup>
@@ -3182,6 +3480,8 @@ export interface BuildResult {
     success: boolean;
     durationMs: number;
     cancelled?: boolean;
+    runtimeIdentifier?: string;
+    androidInstalled?: boolean;
 }
 
 async function runBuildCommand(
@@ -3265,6 +3565,10 @@ async function runTerminalCommand(
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
     progressLogFile?: string
 ): Promise<BuildResult> {
+    if (token?.isCancellationRequested) {
+        return { success: false, durationMs: 0, cancelled: true };
+    }
+
     const exitCodeFile = tempFilePath('.exit');
     const started = Date.now();
 
@@ -3314,14 +3618,17 @@ function androidFastBuildProps(config: string): string[] {
     ];
 }
 
-/** MSBuild properties that speed up iOS physical-device Debug builds by using
- *  the Mono interpreter instead of full AOT native compilation. */
-function iosFastBuildProps(config: string, deviceType?: 'simulator' | 'physical'): string[] {
-    if (config.toLowerCase() !== 'debug' || deviceType !== 'physical') { return []; }
-    return [
-        '-p:UseInterpreter=true',
-        '-p:MtouchLink=None',
-    ];
+function iosFastBuildProps(projectPath: string, config: string, deviceType?: 'simulator' | 'physical'): string[] {
+    if (config.toLowerCase() !== 'debug') { return []; }
+    const properties: string[] = [];
+    const settings = vscode.workspace.getConfiguration('mauideploy', vscode.Uri.file(projectPath));
+    if (settings.get<boolean>('ios.skipCompatibilityAnalyzers', true)) {
+        properties.push('-p:EnableTrimAnalyzer=false', '-p:EnableSingleFileAnalyzer=false');
+    }
+    if (deviceType === 'physical') {
+        properties.push('-p:UseInterpreter=true', '-p:MtouchLink=None');
+    }
+    return properties;
 }
 
 let _tempSeq = 0;
@@ -3601,11 +3908,16 @@ function shellEnvAssignment(name: string, value: string): string {
     return `${name}=${shellQuote(value)}`;
 }
 
-export function disposeTerminals() {
+export function cancelBuildTerminals() {
     for (const terminal of buildTerminals.values()) {
         terminal.dispose();
     }
     buildTerminals.clear();
+}
+
+export function disposeTerminals() {
+    cancelBuildTerminals();
     logTerminal?.dispose();
     buildErrorsOutput?.dispose();
+    androidTimingOutput?.dispose();
 }

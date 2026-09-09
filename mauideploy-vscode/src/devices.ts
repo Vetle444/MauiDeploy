@@ -221,9 +221,30 @@ export function findIosAppBundle(csprojPath: string, framework: string, config: 
     return apps[0];
 }
 
-export function findAndroidApk(csprojPath: string, framework: string, config: string): string | undefined {
+export async function getAndroidRuntimeIdentifier(deviceId: string): Promise<string | undefined> {
+    try {
+        const { stdout } = await execFileAsync('adb', ['-s', deviceId, 'shell', 'getprop', 'ro.product.cpu.abi'], { timeout: 5000 });
+        const runtimeIdentifiers: Record<string, string> = {
+            'arm64-v8a': 'android-arm64',
+            'armeabi-v7a': 'android-arm',
+            'x86_64': 'android-x64',
+            'x86': 'android-x86'
+        };
+        return runtimeIdentifiers[stdout.trim()];
+    } catch { return undefined; }
+}
+
+export function findAndroidApk(csprojPath: string, framework: string, config: string, runtimeIdentifier?: string): string | undefined {
     const projectDir = path.dirname(csprojPath);
     const binDir = path.join(projectDir, 'bin', config, framework);
+    if (runtimeIdentifier) {
+        const runtimeApk = findApkInDirectory(path.join(binDir, runtimeIdentifier));
+        if (runtimeApk) { return runtimeApk; }
+    }
+    return findApkInDirectory(binDir);
+}
+
+function findApkInDirectory(binDir: string): string | undefined {
     if (!fs.existsSync(binDir)) { return undefined; }
 
     try {

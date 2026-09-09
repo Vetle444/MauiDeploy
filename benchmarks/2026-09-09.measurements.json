@@ -1,0 +1,1611 @@
+[
+  {
+    "File": "compiler-no-link-analysis.binlog",
+    "Sha256": "292528FA95F4657B8B8298B61F666A32966ABD2EDAE58CEB8C337D09F7DE8121",
+    "Started": "2026-09-09T12:08:28.769538+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 95.259,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64",
+      "ReportAnalyzer": "true",
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false"
+    },
+    "AppCscSeconds": 29.965,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 29.945
+      },
+      {
+        "Name": "D8",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 18.658
+      },
+      {
+        "Name": "ResolveLibraryProjectImports",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 6.096
+      },
+      {
+        "Name": "Javac",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 5.857
+      },
+      {
+        "Name": "LinkAssembliesNoShrink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 4.366
+      },
+      {
+        "Name": "BuildArchive",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 3.612
+      },
+      {
+        "Name": "Aapt2Compile",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.995
+      },
+      {
+        "Name": "ConvertResourcesCases",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.37
+      }
+    ]
+  },
+  {
+    "File": "compiler-no-trim-analyzer.binlog",
+    "Sha256": "C8D734119BA58E531D0E17BE716E02817047AB486E968A052BED0199A0D0154C",
+    "Started": "2026-09-09T12:03:36.01237+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 64.572,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64",
+      "ReportAnalyzer": "true",
+      "EnableTrimAnalyzer": "false"
+    },
+    "AppCscSeconds": 46.657,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 46.627
+      },
+      {
+        "Name": "CallTarget",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.246
+      },
+      {
+        "Name": "Aapt2Link",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.245
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.799
+      },
+      {
+        "Name": "XamlCTask",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.582
+      },
+      {
+        "Name": "Copy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.962
+      },
+      {
+        "Name": "AndroidApkSigner",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.933
+      },
+      {
+        "Name": "CollectJarContentFilesForArchive",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.922
+      }
+    ]
+  },
+  {
+    "File": "compiler-profile.binlog",
+    "Sha256": "7F940EF8AD04A199064DF47389CEBCF1DCADDAE6D7D48296F1C4B832EB06874C",
+    "Started": "2026-09-09T12:01:09.987326+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 101.346,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64",
+      "ReportAnalyzer": "true"
+    },
+    "AppCscSeconds": 55.492,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 55.464
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 11.231
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 8.48
+      },
+      {
+        "Name": "CallTarget",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 8.137
+      },
+      {
+        "Name": "Aapt2Link",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 8.136
+      },
+      {
+        "Name": "GenerateJavaStubs",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 6.395
+      },
+      {
+        "Name": "GenerateJavaCallableWrappers",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 4.445
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 3.946
+      }
+    ]
+  },
+  {
+    "File": "ios-dynamic-1788951235131.binlog",
+    "Sha256": "9A374EF9DD315600CDE0957A5FA5A781A5E15B0C0A910DBD569495A4DA6B7049",
+    "Started": "2026-09-09T12:53:57.906152+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 47.783,
+    "Properties": {
+      "UseInterpreter": "true",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64",
+      "Registrar": "dynamic"
+    },
+    "AppCscSeconds": 27.552,
+    "NativeCompileSeconds": 0.71,
+    "ILLinkSeconds": 6.436,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 27.523
+      },
+      {
+        "Name": "ILLink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 6.436
+      },
+      {
+        "Name": "ComputeManagedAssemblies",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 4.141
+      },
+      {
+        "Name": "DSymUtil",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.976
+      },
+      {
+        "Name": "Codesign",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.967
+      },
+      {
+        "Name": "XamlCTask",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.921
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.727
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.709
+      }
+    ]
+  },
+  {
+    "File": "ios-dynamic-1788951408676.binlog",
+    "Sha256": "DFC090A912BA6A104AAFA0A08F39E6B5E91BD9A4E2901357E3738FEF8DC3F415",
+    "Started": "2026-09-09T12:56:51.106358+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 88.91,
+    "Properties": {
+      "UseInterpreter": "true",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64",
+      "Registrar": "dynamic"
+    },
+    "AppCscSeconds": 31.494,
+    "NativeCompileSeconds": 0.605,
+    "ILLinkSeconds": 3.535,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 31.481
+      },
+      {
+        "Name": "ACTool",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 18.928
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 12.477
+      },
+      {
+        "Name": "Copy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 8.7
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 5.847
+      },
+      {
+        "Name": "Csc",
+        "Project": "DIPS.Mobile.UI.csproj",
+        "Seconds": 3.782
+      },
+      {
+        "Name": "ILLink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 3.535
+      },
+      {
+        "Name": "Csc",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 3.155
+      }
+    ]
+  },
+  {
+    "File": "ios-dynamic-1788951573098.binlog",
+    "Sha256": "6BCB4112139682E8CA936B20E7FF80CE179FC30925E9BE5E754EAB1F7E8E51FD",
+    "Started": "2026-09-09T12:59:44.163928+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 44.231,
+    "Properties": {
+      "UseInterpreter": "true",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64",
+      "Registrar": "dynamic"
+    },
+    "AppCscSeconds": 28.933,
+    "NativeCompileSeconds": 0.002,
+    "ILLinkSeconds": 4.454,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 28.912
+      },
+      {
+        "Name": "ILLink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 4.454
+      },
+      {
+        "Name": "ComputeManagedAssemblies",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.963
+      },
+      {
+        "Name": "Codesign",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.174
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.101
+      },
+      {
+        "Name": "CopyRefAssembly",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.076
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 0.957
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 0.937
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-26952-1788949055318-2.android.binlog",
+    "Sha256": "9CB0E62FF83CC933C331C5BF13247B1E91DE0144F634679E18058295C257AB6A",
+    "Started": "2026-09-09T12:17:38.407492+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 125.366,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 35.662,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 69.012,
+    "UploadSeconds": 69.021,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 69.012
+      },
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 35.641
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 3.094
+      },
+      {
+        "Name": "CallTarget",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.993
+      },
+      {
+        "Name": "Aapt2Link",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.992
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.668
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 1.54
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.506
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-26952-1788949366942-a.android.binlog",
+    "Sha256": "6F3B001304B0CCA41CD3496F795107AF27D942E08554FDB3F30888A107065A85",
+    "Started": "2026-09-09T12:22:49.910035+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 23.258,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 0,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 7.701,
+    "UploadSeconds": 7.707,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 7.701
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.391
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.239
+      },
+      {
+        "Name": "CallTarget",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.1
+      },
+      {
+        "Name": "Aapt2Link",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.098
+      },
+      {
+        "Name": "UpdateAppRestrictionsTask",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.509
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.88
+      },
+      {
+        "Name": "AndroidApkSigner",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.843
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-26952-1788949445586-i.android.binlog",
+    "Sha256": "8E76565E16B298817745EDE343C60DD3B50BD9AB06F7DAD6E90854655A978CAA",
+    "Started": "2026-09-09T12:24:08.771108+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 83.771,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 53.948,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 7.859,
+    "UploadSeconds": 7.864,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 53.928
+      },
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 7.859
+      },
+      {
+        "Name": "Copy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 3.301
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.633
+      },
+      {
+        "Name": "CallTarget",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.091
+      },
+      {
+        "Name": "Aapt2Link",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.089
+      },
+      {
+        "Name": "GenerateJavaStubs",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.718
+      },
+      {
+        "Name": "GenerateTypeMappings",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.637
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-51396-1788950246540-2.android.binlog",
+    "Sha256": "9983C8BD3F722BDAD4B946E6EF86A37039FD4339051258BDC695C22AEAF2A89E",
+    "Started": "2026-09-09T12:37:30.245831+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 203.391,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 32.767,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 70.129,
+    "UploadSeconds": 70.14,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 70.129
+      },
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 32.744
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 31.021
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 18.106
+      },
+      {
+        "Name": "D8",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 16.447
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 14.85
+      },
+      {
+        "Name": "Copy",
+        "Project": "DIPS.Mobile.UI.csproj",
+        "Seconds": 10.326
+      },
+      {
+        "Name": "Javac",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 6.515
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-51396-1788950973245-a.android.binlog",
+    "Sha256": "856F14AAD96EBA61BF3C605DFA8B61B5900BDC38AE9F3C72DF90E20170431144",
+    "Started": "2026-09-09T12:49:37.448623+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 161.781,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 36.861,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 9.016,
+    "UploadSeconds": 9.023,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 37.933
+      },
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 36.815
+      },
+      {
+        "Name": "D8",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 24.254
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 16.012
+      },
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 9.016
+      },
+      {
+        "Name": "Javac",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 8.03
+      },
+      {
+        "Name": "GenerateJavaStubs",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 7.132
+      },
+      {
+        "Name": "Copy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 6.733
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-51396-1788951694617-i.android.binlog",
+    "Sha256": "50C70DD6D6DF342F78F8411804A15DEAF18303EEA165F1EEA52E858530E6B0E6",
+    "Started": "2026-09-09T13:01:39.834319+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 142.666,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 38.853,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 8.832,
+    "UploadSeconds": 8.839,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 38.831
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 26.653
+      },
+      {
+        "Name": "D8",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 17.162
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 13.182
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 11.202
+      },
+      {
+        "Name": "Javac",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 9.665
+      },
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 8.832
+      },
+      {
+        "Name": "Csc",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 4.984
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-51396-1788952300053-q.android.binlog",
+    "Sha256": "0CC9269F496C451EBD71920CC02E98AA1FDD2AC0A9590956CB0E48B1154ABFE6",
+    "Started": "2026-09-09T13:11:43.476575+02:00",
+    "Succeeded": null,
+    "ReadError": "EndOfStreamException",
+    "BuildSeconds": null,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 0,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.182
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 0.837
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 0.356
+      },
+      {
+        "Name": "FilterAssemblies",
+        "Project": "DIPS.Mobile.UI.csproj",
+        "Seconds": 0.269
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.UI.csproj",
+        "Seconds": 0.216
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.192
+      },
+      {
+        "Name": "GetPrimaryCpuAbi",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.153
+      },
+      {
+        "Name": "ResolveSdks",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.1
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-53928-1788950407080-1.ios.binlog",
+    "Sha256": "E098C12971A7E31CB30400C94183BDE5D5359189ABE6087EA63FD78E43E0D5FF",
+    "Started": "2026-09-09T12:40:11.172932+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 123.9,
+    "Properties": {
+      "UseInterpreter": "true",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64"
+    },
+    "AppCscSeconds": 31.051,
+    "NativeCompileSeconds": 25.674,
+    "ILLinkSeconds": 19.195,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": true,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 31.023
+      },
+      {
+        "Name": "CompileNativeCode",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 25.495
+      },
+      {
+        "Name": "ACTool",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 19.59
+      },
+      {
+        "Name": "ILLink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 19.195
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 10.688
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 4.328
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 4.198
+      },
+      {
+        "Name": "Csc",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 3.913
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-53928-1788950581545-a.ios.binlog",
+    "Sha256": "B98818BDE3F4F484618EC5C6D98800D11A176A3F5C0E39C378FC330C4E357BCE",
+    "Started": "2026-09-09T12:43:02.550603+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 7.069,
+    "Properties": {
+      "UseInterpreter": "true",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64"
+    },
+    "AppCscSeconds": 0,
+    "NativeCompileSeconds": 0.002,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Codesign",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.155
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.139
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 0.641
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 0.605
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.573
+      },
+      {
+        "Name": "DetectSdkLocations",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.351
+      },
+      {
+        "Name": "Microsoft.Build.Tasks.Git.GetUntrackedFiles",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.29
+      },
+      {
+        "Name": "ComputeManagedAssemblies",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.239
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-53928-1788950603146-j.ios.binlog",
+    "Sha256": "FD53C7F9CAF45D43B5951D9BC76A14F140B10C3A128CD6CC83C6C8AD71CBE278",
+    "Started": "2026-09-09T12:43:23.863186+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 123.399,
+    "Properties": {
+      "UseInterpreter": "true",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64"
+    },
+    "AppCscSeconds": 29.156,
+    "NativeCompileSeconds": 54.102,
+    "ILLinkSeconds": 29.664,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": true,
+    "TopTasks": [
+      {
+        "Name": "CompileNativeCode",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 54.099
+      },
+      {
+        "Name": "ILLink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 29.664
+      },
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 29.136
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.395
+      },
+      {
+        "Name": "DSymUtil",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.027
+      },
+      {
+        "Name": "Codesign",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.9
+      },
+      {
+        "Name": "LinkNativeCode",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.897
+      },
+      {
+        "Name": "Copy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.895
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-75717-1788946670737-m.android.binlog",
+    "Sha256": "25E307A5F73132A8EFE35FB05E4BE0156013005719CB6A6073D8EACDA730A2B0",
+    "Started": "2026-09-09T11:37:55.952477+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 214.074,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 58.867,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 66.045,
+    "UploadSeconds": 66.059,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 66.045
+      },
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 58.814
+      },
+      {
+        "Name": "D8",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 17.125
+      },
+      {
+        "Name": "XamlCTask",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 11.128
+      },
+      {
+        "Name": "ResolveLibraryProjectImports",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 10.374
+      },
+      {
+        "Name": "Javac",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 6.959
+      },
+      {
+        "Name": "Aapt2Compile",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 6.324
+      },
+      {
+        "Name": "LinkAssembliesNoShrink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 5.306
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-75717-1788947052883-u.android.binlog",
+    "Sha256": "F49E5A393A1BC77519F1316B6E45A4C3436C07C360F884E02B24E28A047DE041",
+    "Started": "2026-09-09T11:44:16.408555+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 19.977,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 0,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 7.587,
+    "UploadSeconds": 7.596,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 7.587
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.333
+      },
+      {
+        "Name": "CallTarget",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.4
+      },
+      {
+        "Name": "Aapt2Link",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.399
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.392
+      },
+      {
+        "Name": "AndroidApkSigner",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.976
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.838
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.721
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-88253-1788951940532-3.ios.binlog",
+    "Sha256": "8F73AB94CC3B262A1305F9206B6EEB6AFDCFE04EB9A72DEC1F50A219B1FEE981",
+    "Started": "2026-09-09T13:05:44.974829+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 89.799,
+    "Properties": {
+      "UseInterpreter": "true",
+      "Registrar": "dynamic",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64"
+    },
+    "AppCscSeconds": 31.835,
+    "NativeCompileSeconds": 3.883,
+    "ILLinkSeconds": 3.535,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 31.808
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 14.658
+      },
+      {
+        "Name": "ACTool",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 14.602
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 5.466
+      },
+      {
+        "Name": "Copy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 4.793
+      },
+      {
+        "Name": "Csc",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 4.641
+      },
+      {
+        "Name": "SmartCopy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 3.813
+      },
+      {
+        "Name": "Csc",
+        "Project": "DIPS.Mobile.UI.csproj",
+        "Seconds": 3.737
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-88253-1788952050782-c.ios.binlog",
+    "Sha256": "3F8F97DCCEBDE7ABD5FB0C5833FC21592AE11962012DB76F0300A1724392C510",
+    "Started": "2026-09-09T13:07:31.554504+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 38.818,
+    "Properties": {
+      "UseInterpreter": "true",
+      "Registrar": "dynamic",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64"
+    },
+    "AppCscSeconds": 26.579,
+    "NativeCompileSeconds": 0.002,
+    "ILLinkSeconds": 3.85,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 26.568
+      },
+      {
+        "Name": "ILLink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 3.85
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.59
+      },
+      {
+        "Name": "Codesign",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.861
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 0.809
+      },
+      {
+        "Name": "CopyRefAssembly",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.766
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.724
+      },
+      {
+        "Name": "Copy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.617
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-92495-1788952118240-1.ios.binlog",
+    "Sha256": "6C817B36101046B3045FACE9A7A8B380B49F734C0D92BA49F3C737C5FFB0863F",
+    "Started": "2026-09-09T13:08:39.074708+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 47.983,
+    "Properties": {
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "UseInterpreter": "true",
+      "Registrar": "dynamic",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64"
+    },
+    "AppCscSeconds": 27.339,
+    "NativeCompileSeconds": 0.002,
+    "ILLinkSeconds": 4.632,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 27.325
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 7.148
+      },
+      {
+        "Name": "ILLink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 4.632
+      },
+      {
+        "Name": "Csc",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 3.757
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 2.384
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 2.201
+      },
+      {
+        "Name": "Csc",
+        "Project": "DIPS.Mobile.UI.csproj",
+        "Seconds": 1.821
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.297
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-92495-1788952193890-a.ios.binlog",
+    "Sha256": "6179A59F7D19ABAF62C78A364C4F781E2035B63755EA697512FE4BE507D19FC9",
+    "Started": "2026-09-09T13:09:54.791261+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 6.906,
+    "Properties": {
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "UseInterpreter": "true",
+      "Registrar": "dynamic",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64"
+    },
+    "AppCscSeconds": 0,
+    "NativeCompileSeconds": 0.002,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.639
+      },
+      {
+        "Name": "Codesign",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.035
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 0.66
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.UI.csproj",
+        "Seconds": 0.64
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.629
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 0.536
+      },
+      {
+        "Name": "Microsoft.Build.Tasks.Git.GetUntrackedFiles",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.335
+      },
+      {
+        "Name": "ComputeManagedAssemblies",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.218
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-92495-1788952212509-j.ios.binlog",
+    "Sha256": "9F89A06097C205B5CD8A5715F6B25DF2FAB213201CEF21D7FC4C4E780B56110E",
+    "Started": "2026-09-09T13:10:13.319386+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 44.167,
+    "Properties": {
+      "EnableTrimAnalyzer": "false",
+      "EnableSingleFileAnalyzer": "false",
+      "UseInterpreter": "true",
+      "Registrar": "dynamic",
+      "TargetFramework": "net10.0-ios",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "ios-arm64"
+    },
+    "AppCscSeconds": 28.663,
+    "NativeCompileSeconds": 0.002,
+    "ILLinkSeconds": 4.24,
+    "FastDeploySeconds": 0,
+    "UploadSeconds": 0,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 28.641
+      },
+      {
+        "Name": "ILLink",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 4.24
+      },
+      {
+        "Name": "XamlCTask",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.221
+      },
+      {
+        "Name": "Codesign",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.239
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.236
+      },
+      {
+        "Name": "Copy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.985
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 0.679
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 0.628
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-93438-1788947262736-2.android.binlog",
+    "Sha256": "0549327662375AC944D4F8C1BBD52E085C00B672FDA2BF6739BF946885CBCD0C",
+    "Started": "2026-09-09T11:47:46.995426+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 37.849,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 0,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 7.676,
+    "UploadSeconds": 7.679,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "CallTarget",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 8.176
+      },
+      {
+        "Name": "Aapt2Link",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 8.175
+      },
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 7.676
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 5.117
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "OpenEhr.Forms.Mobile.csproj",
+        "Seconds": 3.058
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "DIPS.Mobile.Essentials.csproj",
+        "Seconds": 3.044
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.427
+      },
+      {
+        "Name": "ProcessAssemblies",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.256
+      }
+    ]
+  },
+  {
+    "File": "mauideploy-93438-1788947429825-a.android.binlog",
+    "Sha256": "F96E452F465371E6DDA7B70D0BEBBFD2E83E909C40400F1D7266A502DD73ACB7",
+    "Started": "2026-09-09T11:50:34.320621+02:00",
+    "Succeeded": true,
+    "ReadError": null,
+    "BuildSeconds": 101.333,
+    "Properties": {
+      "EmbedAssembliesIntoApk": "false",
+      "TargetFramework": "net10.0-android",
+      "Configuration": "Debug",
+      "RuntimeIdentifier": "android-arm64"
+    },
+    "AppCscSeconds": 66.422,
+    "NativeCompileSeconds": 0,
+    "ILLinkSeconds": 0,
+    "FastDeploySeconds": 7.976,
+    "UploadSeconds": 7.98,
+    "InstallSeconds": 0,
+    "RegistrarCompiled": false,
+    "TopTasks": [
+      {
+        "Name": "Csc",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 66.379
+      },
+      {
+        "Name": "FastDeploy",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 7.976
+      },
+      {
+        "Name": "GenerateJavaCallableWrappers",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 5.124
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.964
+      },
+      {
+        "Name": "GenerateJavaStubs",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 2.61
+      },
+      {
+        "Name": "MSBuild",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.997
+      },
+      {
+        "Name": "CallTarget",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.649
+      },
+      {
+        "Name": "Aapt2Link",
+        "Project": "Arena.Mobile.csproj",
+        "Seconds": 1.647
+      }
+    ]
+  }
+]

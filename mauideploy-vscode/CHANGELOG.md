@@ -2,6 +2,31 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 1.4.0 - 2026-09-09
+
+### Added
+- Skip trimming and single-file compatibility analysis by default for iOS Debug Run and Debug, on simulators and physical devices. Set `mauideploy.ios.skipCompatibilityAnalyzers` to `false` to retain project settings. Release, source generators, and other analyzers are unchanged.
+- Use the dynamic registrar by default for physical iOS Debug Run and Debug builds. Turn off `mauideploy.ios.useDynamicRegistrar` if the app crashes; first use and setting changes clean the matching output before rebuilding. Release and simulator builds are unchanged.
+- Report iOS Run build, install, launch, and total timings, with optional local MSBuild binlogs.
+- Skip trimming and single-file compatibility analysis by default for Android Debug, with an option to retain the project's analysis settings. Source generators and other analyzers remain enabled.
+- Detect Android device architecture and build only the matching runtime in Debug.
+- Use Android SDK incremental installation and Fast Deployment for both Run and Debug, with settings for full APK deployment and forced reinstall while preserving app data.
+- Report Android build/restore, deploy, and launch timings; optionally save local MSBuild binlogs.
+- Preserve Android build metadata for Deploy from Bin and reuse unchanged standalone APK installations after checking package identity.
+
+### Fixed
+- Wait for iOS installation and launch to complete, and propagate deployment failures and cancellation.
+- Avoid duplicate APK installation when starting the debugger after SDK deployment.
+- Use normal incremental NuGet restore for Android architecture changes and serialize multi-target builds of the same project to prevent shared restore-cache races.
+
+## 1.3.3 - 2026-08-18
+
+### Added
+- Replaced running status-bar spinners with a stop button for the current Run, Run Multiple, Deploy from Bin, Debug, or Test operation.
+
+### Fixed
+- Reset stuck running state when a build terminal exits without writing its completion marker.
+
 ## 1.3.2 - 2026-08-12
 
 ### Fixed

@@ -15,6 +15,7 @@ public class LaunchConfig
     public string AppName { get; }
     public string? ApplicationId { get; }
     public int DebugPort { get; }
+    public bool AndroidAlreadyInstalled { get; }
 
     public LaunchConfig(Dictionary<string, JToken> properties)
     {
@@ -29,6 +30,7 @@ public class LaunchConfig
         AppName = Path.GetFileNameWithoutExtension(ProjectPath);
         ApplicationId = properties.GetValueOrDefault("applicationId")?.Value<string>();
         DebugPort = properties.GetValueOrDefault("debugPort")?.Value<int>() ?? GetFreePort();
+        AndroidAlreadyInstalled = properties.GetValueOrDefault("androidAlreadyInstalled")?.Value<bool>() ?? false;
     }
 
     private static int GetFreePort()

@@ -2,7 +2,7 @@
   "name": "maui-deploy",
   "displayName": "MauiDeploy",
   "description": "Rider-like toolbar for building, deploying, and debugging with Hot-Reload in .NET MAUI apps",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "author": "FinstadProductions",
   "publisher": "FinstadProductions",
   "license": "MIT",
@@ -36,6 +36,50 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configuration": {
+      "title": "MAUI Deploy",
+      "properties": {
+        "mauideploy.android.fastDeployment": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use Android SDK Fast Deployment for Debug builds. Disable to embed assemblies in the APK. Applies to both Run and Debug."
+        },
+        "mauideploy.android.skipCompatibilityAnalyzers": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Speed up Android Debug Run and Debug builds by skipping trimming and single-file compatibility analysis. Source generators and other analyzers remain enabled. Compatibility warnings are deferred to builds with analysis enabled; Release and builds outside MAUI Deploy are unchanged."
+        },
+        "mauideploy.android.forceReinstall": {
+          "type": "boolean",
+          "default": false,
+          "description": "Force Android APK reinstall on every deploy, preserving app data. Turn off to reuse unchanged installations."
+        },
+        "mauideploy.ios.skipCompatibilityAnalyzers": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Speed up iOS Debug Run and Debug builds by skipping trimming and single-file compatibility analysis, on simulators and physical devices. Source generators and other analyzers remain enabled. Set to false to retain the project's analysis settings. Compatibility warnings are deferred to builds with analysis enabled; Release and builds outside MAUI Deploy are unchanged."
+        },
+        "mauideploy.ios.useDynamicRegistrar": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Speed up physical iOS Debug builds with the dynamic registrar for both Run and Debug. Turn this off if the app crashes; the next Run or Debug cleans and rebuilds using the project's registrar settings. Also cleans on first use. Overrides an explicit project Registrar value when enabled. Release and simulator builds are unchanged."
+        },
+        "mauideploy.ios.collectBinlogs": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Record local MSBuild binlogs for iOS Run builds and physical-device Debug builds. Paths appear in MAUI Deploy - iOS Performance. Logs may contain sensitive project properties; inspect before sharing."
+        },
+        "mauideploy.android.collectBinlogs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Record local Android MSBuild binlogs. Paths and phase timings appear in MAUI Deploy - Android Performance. Logs may contain sensitive project data."
+        }
+      }
+    },
     "debuggers": [
       {
         "type": "mauideploy",
@@ -112,6 +156,11 @@
         "icon": "$(beaker)"
       },
       {
+        "command": "mauideploy.stop",
+        "title": "MAUI Deploy: Stop Current Operation",
+        "icon": "$(debug-stop)"
+      },
+      {
         "command": "mauideploy.pickProject",
         "title": "MAUI Deploy: Select Project",
         "icon": "$(file-code)"
@@ -147,6 +196,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "test": "npm run compile && node --test test/*.test.cjs",
     "watch": "tsc -watch -p ./",
     "package": "npx @vscode/vsce package --allow-missing-repository"
   },

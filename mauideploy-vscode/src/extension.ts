@@ -11,7 +11,7 @@ import {
 } from './devices';
 import { findWorkspaceMauiProjects, findWorkspaceCsprojs, findCsprojsInDir } from './projects';
 import {
-    buildAndDeploy, deployFromBin, buildForDebug, disposeTerminals,
+    buildAndDeploy, deployFromBin, buildForDebug, cancelBuildTerminals, disposeTerminals,
     askCopilotToFixLastBuildFailure, runTests,
     BuildResult, DEFAULT_XAML_HOT_RELOAD_PORT
 } from './deployer';
@@ -41,6 +41,21 @@ interface DeployTarget {
 let state: State = { config: 'Debug', recentDevices: [] };
 let ctx: vscode.ExtensionContext;
 let isBuilding = false;
+
+type OperationCommand =
+    | 'mauideploy.run'
+    | 'mauideploy.runMultiple'
+    | 'mauideploy.deployFromBin'
+    | 'mauideploy.debug'
+    | 'mauideploy.runTests';
+
+interface ActiveOperation {
+    command: OperationCommand;
+    item: vscode.StatusBarItem;
+    cancellation: vscode.CancellationTokenSource;
+}
+
+let activeOperation: ActiveOperation | undefined;
 
 // ── Device Cache ───────────────────────────────────────
 let cachedDevices: Device[] = [];
@@ -152,6 +167,7 @@ function createStatusBar(context: vscode.ExtensionContext) {
 function updateStatusBar() {
     // ── Run button ──
     if (!isBuilding) {
+        sbRun.command = 'mauideploy.run';
         sbRun.text = '$(play)';
         sbRun.color = '#89d185';
         sbRun.backgroundColor = undefined;
@@ -165,6 +181,7 @@ function updateStatusBar() {
 
     // ── Run multiple targets button ──
     if (!isBuilding) {
+        sbRunMultiple.command = 'mauideploy.runMultiple';
         sbRunMultiple.text = '$(run-all)';
         sbRunMultiple.color = '#89d185';
         sbRunMultiple.backgroundColor = undefined;
@@ -174,6 +191,7 @@ function updateStatusBar() {
 
     // ── Deploy from bin button ──
     if (!isBuilding) {
+        sbDeployFromBin.command = 'mauideploy.deployFromBin';
         sbDeployFromBin.text = '$(rocket)';
         sbDeployFromBin.color = '#4ec9b0';
         sbDeployFromBin.backgroundColor = undefined;
@@ -200,6 +218,7 @@ function updateStatusBar() {
 
     // ── Tests button ──
     if (!isBuilding) {
+        sbTests.command = 'mauideploy.runTests';
         sbTests.text = '$(beaker)';
         sbTests.color = '#c586c0';
         sbTests.backgroundColor = undefined;
@@ -307,11 +326,62 @@ function createStatusBarReporter(item: vscode.StatusBarItem, label: string) {
     return (elapsedMs: number, buildPercent: number) => {
         const pct = Math.round(model.next(elapsedMs, buildPercent));
         if (pct !== lastShownPercent) {
-            item.text = `$(sync~spin) ${pct}%`;
-            item.tooltip = `${label} — ${formatElapsed(elapsedMs)}`;
+            item.text = `$(debug-stop) ${pct}%`;
+            item.color = '#f44747';
+            item.tooltip = `${label} — ${formatElapsed(elapsedMs)}\n\nClick to stop`;
             lastShownPercent = pct;
         }
     };
+}
+
+function beginOperation(command: OperationCommand, item: vscode.StatusBarItem): ActiveOperation {
+    const operation: ActiveOperation = {
+        command,
+        item,
+        cancellation: new vscode.CancellationTokenSource(),
+    };
+    activeOperation = operation;
+    isBuilding = true;
+    item.command = 'mauideploy.stop';
+    return operation;
+}
+
+function showStopButton(item: vscode.StatusBarItem, tooltip: string) {
+    item.text = '$(debug-stop)';
+    item.color = '#f44747';
+    item.backgroundColor = undefined;
+    item.command = 'mauideploy.stop';
+    item.tooltip = `${tooltip}\n\nClick to stop`;
+}
+
+function finishOperation(operation: ActiveOperation) {
+    if (activeOperation !== operation) {
+        operation.cancellation.dispose();
+        return;
+    }
+
+    activeOperation = undefined;
+    isBuilding = false;
+    operation.item.command = operation.command;
+    operation.cancellation.dispose();
+
+    if (operation.item.text.startsWith('$(debug-stop)')) {
+        updateStatusBar();
+    }
+}
+
+function cmdStopOperation() {
+    const operation = activeOperation;
+    if (!operation) {
+        isBuilding = false;
+        updateStatusBar();
+        return;
+    }
+
+    operation.item.tooltip = 'Stopping…';
+    operation.item.command = undefined;
+    operation.cancellation.cancel();
+    cancelBuildTerminals();
 }
 
 function formatDuration(ms: number): string {
@@ -454,6 +524,7 @@ function registerCommands(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('mauideploy.deployFromBin', cmdDeployFromBin),
         vscode.commands.registerCommand('mauideploy.debug', cmdDebug),
         vscode.commands.registerCommand('mauideploy.runTests', cmdRunTests),
+        vscode.commands.registerCommand('mauideploy.stop', cmdStopOperation),
         vscode.commands.registerCommand('mauideploy.pickProject', cmdPickProject),
         vscode.commands.registerCommand('mauideploy.toggleConfig', cmdToggleConfig),
         vscode.commands.registerCommand('mauideploy.pickDevice', cmdPickDevice),
@@ -909,19 +980,17 @@ async function cmdRun() {
 
     if (!await ensureToolsAvailable(toolsForCurrentTarget())) { return; }
 
-    isBuilding = true;
-    sbRun.text = '$(sync~spin)';
-    sbRun.color = '#dcdcaa';
-    sbRun.tooltip = 'Building…';
+    const operation = beginOperation('mauideploy.run', sbRun);
+    showStopButton(sbRun, 'Building…');
 
     try {
         // Boot iOS simulator if needed (skip for physical devices)
         if (state.devicePlatform === 'iOS' && state.deviceType !== 'physical') {
             const allDevices = await detectAllDevices(platforms);
+            if (operation.cancellation.token.isCancellationRequested) { return; }
             const device = allDevices.find(d => d.id === state.deviceId);
             if (device && device.state === 'Shutdown') {
-                sbRun.text = '$(sync~spin)';
-                sbRun.tooltip = `Booting ${state.deviceName}…`;
+                showStopButton(sbRun, `Booting ${state.deviceName}…`);
                 const booted = await bootSimulator(device.id);
                 if (!booted) {
                     vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
@@ -929,9 +998,10 @@ async function cmdRun() {
                 }
             }
         }
+        if (operation.cancellation.token.isCancellationRequested) { return; }
 
         // Build & deploy
-        sbRun.tooltip = 'Building & deploying…';
+        showStopButton(sbRun, 'Building & deploying…');
         const device: Device = {
             id: state.deviceId!, name: state.deviceName!,
             platform: state.devicePlatform!, state: 'Booted',
@@ -942,12 +1012,12 @@ async function cmdRun() {
         const projectName = path.basename(state.projectPath!, '.csproj');
         const result = await buildAndDeploy(
             state.projectPath!, platform, device, state.config,
-            undefined,
+            operation.cancellation.token,
             createStatusBarReporter(sbRun, `Building ${projectName}`)
         );
 
         if (result.cancelled) {
-            updateStatusBar();
+            return;
         } else if (result.success) {
             const duration = formatDuration(result.durationMs);
             sbRun.text = '$(check)';
@@ -959,8 +1029,7 @@ async function cmdRun() {
             flashError(sbRun);
         }
     } finally {
-        isBuilding = false;
-        if (sbRun.text === '$(sync~spin)') { updateStatusBar(); }
+        finishOperation(operation);
     }
 }
 
@@ -988,15 +1057,13 @@ async function cmdRunMultiple() {
 
     if (!await ensureToolsAvailable(toolsForDeployTargets(targets))) { return; }
 
-    isBuilding = true;
-    sbRunMultiple.text = '$(sync~spin)';
-    sbRunMultiple.color = '#dcdcaa';
-    sbRunMultiple.tooltip = 'Preparing targets…';
+    const operation = beginOperation('mauideploy.runMultiple', sbRunMultiple);
+    showStopButton(sbRunMultiple, 'Preparing targets…');
 
     const started = Date.now();
 
     try {
-        if (!await bootDeployTargets(targets, sbRunMultiple)) { return; }
+        if (!await bootDeployTargets(targets, sbRunMultiple, operation.cancellation.token)) { return; }
 
         const projectName = path.basename(state.projectPath!, '.csproj');
         const progress = createMultiRunProgress(sbRunMultiple, `Building ${projectName}`, targets);
@@ -1005,7 +1072,7 @@ async function cmdRunMultiple() {
         const runs = targets.map(async target => {
             const result = await buildAndDeploy(
                 state.projectPath!, target.platform, target.device, state.config,
-                undefined,
+                operation.cancellation.token,
                 progress.reporterFor(target),
                 deployTargetTerminalName(target)
             );
@@ -1032,12 +1099,12 @@ async function cmdRunMultiple() {
             flashError(sbRunMultiple);
             vscode.window.showErrorMessage(`Failed to deploy to ${formatFailedDeployTargets(failed)}. Check the target build terminals.`);
         } else {
-            updateStatusBar();
-            vscode.window.showWarningMessage(`Run cancelled for ${formatDeployTargets(cancelled.map(entry => entry.value.target))}.`);
+            if (!operation.cancellation.token.isCancellationRequested) {
+                vscode.window.showWarningMessage(`Run cancelled for ${formatDeployTargets(cancelled.map(entry => entry.value.target))}.`);
+            }
         }
     } finally {
-        isBuilding = false;
-        if (sbRunMultiple.text.startsWith('$(sync~spin)')) { updateStatusBar(); }
+        finishOperation(operation);
     }
 }
 
@@ -1152,16 +1219,22 @@ function getDefaultDeployTargetIds(devices: Device[]): Set<string> {
     return ids;
 }
 
-async function bootDeployTargets(targets: DeployTarget[], item: vscode.StatusBarItem): Promise<boolean> {
+async function bootDeployTargets(
+    targets: DeployTarget[],
+    item: vscode.StatusBarItem,
+    token: vscode.CancellationToken
+): Promise<boolean> {
     for (const target of targets) {
+        if (token.isCancellationRequested) { return false; }
+
         const device = target.device;
         if (device.platform !== 'iOS' || device.type === 'physical' || device.state !== 'Shutdown') {
             continue;
         }
 
-        item.text = '$(sync~spin)';
-        item.tooltip = `Booting ${device.name}…`;
+        showStopButton(item, `Booting ${device.name}…`);
         const booted = await bootSimulator(device.id);
+        if (token.isCancellationRequested) { return false; }
         if (!booted) {
             vscode.window.showErrorMessage(`Failed to boot ${device.name}.`);
             return false;
@@ -1179,8 +1252,9 @@ function createMultiRunProgress(item: vscode.StatusBarItem, label: string, targe
     const update = () => {
         const total = [...progressByTarget.values()].reduce((sum, value) => sum + value, 0);
         const percent = Math.round(total / targets.length);
-        item.text = `$(sync~spin) ${percent}%`;
-        item.tooltip = `${label} — ${formatElapsed(Date.now() - started)}`;
+        item.text = `$(debug-stop) ${percent}%`;
+        item.color = '#f44747';
+        item.tooltip = `${label} — ${formatElapsed(Date.now() - started)}\n\nClick to stop`;
     };
 
     return {
@@ -1249,19 +1323,17 @@ async function cmdDeployFromBin() {
 
     if (!await ensureToolsAvailable(toolsForCurrentTarget())) { return; }
 
-    isBuilding = true;
-    sbDeployFromBin.text = '$(sync~spin)';
-    sbDeployFromBin.color = '#dcdcaa';
-    sbDeployFromBin.tooltip = 'Deploying from bin…';
+    const operation = beginOperation('mauideploy.deployFromBin', sbDeployFromBin);
+    showStopButton(sbDeployFromBin, 'Deploying from bin…');
 
     try {
         // Boot iOS simulator if needed (skip for physical devices)
         if (state.devicePlatform === 'iOS' && state.deviceType !== 'physical') {
             const allDevices = await detectAllDevices(platforms);
+            if (operation.cancellation.token.isCancellationRequested) { return; }
             const device = allDevices.find(d => d.id === state.deviceId);
             if (device && device.state === 'Shutdown') {
-                sbDeployFromBin.text = '$(sync~spin)';
-                sbDeployFromBin.tooltip = `Booting ${state.deviceName}…`;
+                showStopButton(sbDeployFromBin, `Booting ${state.deviceName}…`);
                 const booted = await bootSimulator(device.id);
                 if (!booted) {
                     vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
@@ -1269,6 +1341,7 @@ async function cmdDeployFromBin() {
                 }
             }
         }
+        if (operation.cancellation.token.isCancellationRequested) { return; }
 
         const device: Device = {
             id: state.deviceId!, name: state.deviceName!,
@@ -1287,9 +1360,7 @@ async function cmdDeployFromBin() {
             setTimeout(() => updateStatusBar(), 3000);
         }
     } finally {
-        isBuilding = false;
-        // Don't call updateStatusBar here — let the success flash timeout do it
-        if (sbDeployFromBin.text === '$(sync~spin)') { updateStatusBar(); }
+        finishOperation(operation);
     }
 }
 
@@ -1333,38 +1404,38 @@ async function cmdDebug() {
 
     if (!await ensureToolsAvailable(toolsForCurrentTarget())) { return; }
 
-    // Boot iOS simulator if needed (skip for physical devices)
-    if (state.devicePlatform === 'iOS' && state.deviceType !== 'physical') {
-        const allDevices = await detectAllDevices(platforms);
-        const device = allDevices.find(d => d.id === state.deviceId);
-        if (device && device.state === 'Shutdown') {
-            sbDebug.text = '$(sync~spin)';
-            sbDebug.tooltip = `Booting ${state.deviceName}…`;
-            const booted = await bootSimulator(device.id);
-            if (!booted) {
-                vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
-                return;
-            }
-        }
-    }
-
-    isBuilding = true;
-    sbDebug.text = '$(sync~spin)';
-    sbDebug.color = '#dcdcaa';
-    sbDebug.tooltip = 'Building for debug…';
+    const operation = beginOperation('mauideploy.debug', sbDebug);
+    showStopButton(sbDebug, 'Preparing debug session…');
 
     try {
+        // Boot iOS simulator if needed (skip for physical devices)
+        if (state.devicePlatform === 'iOS' && state.deviceType !== 'physical') {
+            const allDevices = await detectAllDevices(platforms);
+            if (operation.cancellation.token.isCancellationRequested) { return; }
+            const device = allDevices.find(d => d.id === state.deviceId);
+            if (device && device.state === 'Shutdown') {
+                showStopButton(sbDebug, `Booting ${state.deviceName}…`);
+                const booted = await bootSimulator(device.id);
+                if (!booted) {
+                    vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
+                    return;
+                }
+            }
+        }
+        if (operation.cancellation.token.isCancellationRequested) { return; }
+
         // Build with debug flags (MtouchDebug=true for iOS)
+        showStopButton(sbDebug, 'Building for debug…');
         const projectName = path.basename(state.projectPath!, '.csproj');
         const hotReloadPort = xamlHotReloadPort;
         const buildResult = await buildForDebug(
             state.projectPath!, platform, state.config, state.deviceType,
-            undefined,
+            operation.cancellation.token,
             createStatusBarReporter(sbDebug, `Building ${projectName} for debug`),
-            hotReloadPort
+            hotReloadPort,
+            state.deviceId
         );
         if (buildResult.cancelled) {
-            updateStatusBar();
             return;
         }
         if (!buildResult.success) {
@@ -1375,7 +1446,7 @@ async function cmdDebug() {
         // Find the built app path
         const programPath = state.devicePlatform === 'iOS'
             ? findIosAppBundle(state.projectPath!, platform.framework, state.config, state.deviceType)
-            : findAndroidApk(state.projectPath!, platform.framework, state.config);
+            : findAndroidApk(state.projectPath!, platform.framework, state.config, buildResult.runtimeIdentifier);
 
         if (!programPath) {
             vscode.window.showErrorMessage('Could not find built app. Build may have failed.');
@@ -1397,12 +1468,17 @@ async function cmdDebug() {
             deviceName: state.deviceName!,
             deviceType: state.deviceType || 'simulator',
             programPath: programPath,
+            androidAlreadyInstalled: buildResult.androidInstalled === true,
             xamlHotReloadPort: hotReloadPort,
             applicationId: state.devicePlatform === 'Android'
                 ? getAndroidPackageId(state.projectPath!) : undefined,
         };
 
         const started = await vscode.debug.startDebugging(workspaceFolder, debugConfig);
+        if (operation.cancellation.token.isCancellationRequested) {
+            if (started) { await vscode.debug.stopDebugging(); }
+            return;
+        }
         if (started) {
             sbDebug.text = '$(check)';
             sbDebug.color = '#89d185';
@@ -1412,8 +1488,7 @@ async function cmdDebug() {
             flashError(sbDebug);
         }
     } finally {
-        isBuilding = false;
-        updateStatusBar();
+        finishOperation(operation);
     }
 }
 
@@ -1468,19 +1543,17 @@ async function cmdRunTests() {
     const testProject = await pickTestProject();
     if (!testProject) { return; }
 
-    isBuilding = true;
-    sbTests.text = '$(sync~spin)';
-    sbTests.color = '#dcdcaa';
-    sbTests.tooltip = `Running tests for ${path.basename(testProject.projectPath)}…`;
+    const operation = beginOperation('mauideploy.runTests', sbTests);
+    showStopButton(sbTests, `Running tests for ${path.basename(testProject.projectPath)}…`);
 
     try {
         const testName = path.basename(testProject.projectPath, '.csproj');
         const result = await runTests(
-            testProject.projectPath, testProject.config, undefined,
+            testProject.projectPath, testProject.config, operation.cancellation.token,
             createStatusBarReporter(sbTests, `Running tests — ${testName}`)
         );
         if (result.cancelled) {
-            updateStatusBar();
+            return;
         } else if (result.success) {
             const duration = formatDuration(result.durationMs);
             sbTests.text = '$(check)';
@@ -1492,8 +1565,7 @@ async function cmdRunTests() {
             flashError(sbTests);
         }
     } finally {
-        isBuilding = false;
-        if (sbTests.text === '$(sync~spin)') { updateStatusBar(); }
+        finishOperation(operation);
     }
 }
 
