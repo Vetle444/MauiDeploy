@@ -17,8 +17,11 @@
         h2 { font-size: 20px; line-height: 1.4; margin: 0 0 12px; }
         p { color: var(--muted); font-size: 15px; line-height: 1.6; margin: 0 0 28px; overflow-wrap: anywhere; }
         section { border-top: 2px solid var(--accent); padding-top: 24px; }
+        .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
         a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; max-width: 100%; padding: 12px 18px; border-radius: 6px; color: #fff; background: var(--accent); font-size: 15px; font-weight: 700; text-decoration: none; text-align: center; overflow-wrap: anywhere; }
         a:hover { background: #0c533f; }
+        .return-link { color: var(--accent); background: transparent; text-decoration: underline; text-underline-offset: 4px; }
+        .return-link:hover { color: var(--ink); background: #e8efeb; }
         a:focus-visible { outline: 3px solid #bc653a; outline-offset: 4px; }
         [hidden] { display: none; }
         @media (max-width: 480px) { body { padding: 40px 24px; } main { margin-top: 8vh; } header { margin-bottom: 32px; } h1 { font-size: 26px; } }
@@ -31,7 +34,11 @@
         <section aria-live="polite">
             <h2 id="status">Opening Visual Studio Code</h2>
             <p id="target"></p>
-            <a id="open" hidden>Open Visual Studio Code</a>
+            <div class="actions">
+                <a id="open" hidden>Open Visual Studio Code</a>
+                <a id="return" class="return-link" lang="nb" target="_blank" rel="noopener noreferrer"
+                    title="&Aring;pner PR-en i en ny fane" aria-label="Tilbake til PR (&aring;pnes i ny fane)" hidden>Tilbake til PR</a>
+            </div>
         </section>
         <noscript><p>JavaScript is disabled. Automatic opening is unavailable.</p></noscript>
     </main>
@@ -54,22 +61,36 @@
             const editor = parameters.get('editor') || 'vscode';
             if (!['vscode', 'vscode-insiders'].includes(editor)) { throw new Error('Invalid editor'); }
             const query = new URLSearchParams({ repo: repository.href, pr: pullRequest });
+            const pullRequestUrl = new URL(repository.href);
+            pullRequestUrl.pathname = `${repository.pathname}/pull/${pullRequest}`;
             return {
                 uri: `${editor}://FinstadProductions.maui-deploy/deploy-pr?${query}`,
-                label: `${repository.hostname}${repository.pathname} / PR #${pullRequest}`
+                label: `${repository.hostname}${repository.pathname} / PR #${pullRequest}`,
+                pullRequestUrl: pullRequestUrl.href
             };
         }
 
+        let target;
         try {
-            const target = deploymentTarget(location.hash);
+            target = deploymentTarget(location.hash);
+        } catch {
+            document.getElementById('status').textContent = 'Invalid deployment link';
+            document.getElementById('target').textContent = 'The repository or pull request is missing or invalid.';
+        }
+
+        if (target) {
             document.getElementById('target').textContent = target.label;
             const open = document.getElementById('open');
             open.href = target.uri;
             open.hidden = false;
-            location.assign(target.uri);
-        } catch {
-            document.getElementById('status').textContent = 'Invalid deployment link';
-            document.getElementById('target').textContent = 'The repository or pull request is missing or invalid.';
+            const returnLink = document.getElementById('return');
+            returnLink.href = target.pullRequestUrl;
+            returnLink.hidden = false;
+            try {
+                location.assign(target.uri);
+            } catch {
+                document.getElementById('status').textContent = 'Automatic opening unavailable';
+            }
         }
     </script>
 </body>

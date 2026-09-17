@@ -6,6 +6,7 @@ const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { execFileSync } = require('node:child_process');
 const { test } = require('node:test');
+const { URI } = require('vscode-uri');
 const { getGitRepository, resolveCommit, withDeploymentWorktree } = require('../out/worktrees');
 const {
     parseRepositoryUrl, parsePullRequestUrl, parseDeployLink, createPullRequestLink, sameRepository,
@@ -139,6 +140,204 @@ test('PR links identify GitHub and Enterprise repositories without accepting com
     }
     assert.throws(() => parsePullRequestUrl('https://token@github.com/team/repo/pull/12'));
     assert.throws(() => parsePullRequestUrl('https://github.com/team/repo/pull/12/../../issues'));
+});
+
+test('the registered URI handler preserves PR parameters through VS Code URI serialization', async () => {
+    const filename = path.resolve(__dirname, '../out/extension.js');
+    const localRequire = createRequire(filename);
+    const bridge = new URL('https://vetle444.github.io/MauiDeploy/deploy/#repo=https%3A%2F%2Fdips.ghe.com%2Fdips%2FArena.Mobile&pr=2501');
+    const expected = parsePullRequestUrl('https://dips.ghe.com/dips/Arena.Mobile/pull/2501');
+    for (const scheme of ['vscode', 'vscode-insiders']) {
+        let handler;
+        const deployments = [];
+        const errors = [];
+        const sandbox = {
+            exports: {}, process,
+            captureDeployment: reference => deployments.push(reference),
+            require: name => {
+                if (name === 'vscode') {
+                    return {
+                        env: { uriScheme: scheme },
+                        window: {
+                            registerUriHandler: value => { handler = value; return { dispose() {} }; },
+                            showErrorMessage: async message => errors.push(message)
+                        }
+                    };
+                }
+                if (name === './branchDeploy') { return { registerBranchSetup() {} }; }
+                if (name === './screenshotCommand') { return { registerScreenshotCommand() {} }; }
+                if (['./devices', './projects', './deployer'].includes(name)) { return {}; }
+                return localRequire(name);
+            }
+        };
+        vm.runInNewContext(fs.readFileSync(filename, 'utf8') + `
+            augmentProcessPath = () => {};
+            loadState = () => {};
+            createStatusBar = () => {};
+            registerCommands = () => {};
+            registerDebugHotReload = () => {};
+            registerDebugAdapterFactory = () => {};
+            autoDetectProject = () => {};
+            startDevicePolling = () => {};
+            cmdDeployBranch = async reference => captureDeployment(reference);
+        `, sandbox, { filename });
+        sandbox.exports.activate({ subscriptions: [] });
+        const deepLink = `${scheme}://FinstadProductions.maui-deploy/deploy-pr?${bridge.hash.slice(1)}`;
+        const uri = URI.parse(deepLink);
+        assert.equal([...new URL(uri.toString()).searchParams.keys()].length, 1);
+        await handler.handleUri(uri);
+        assert.deepEqual(errors, []);
+        assert.deepEqual(deployments, [expected]);
+
+        const redirectLink = new URL(createPullRequestLink(`${expected.repository.url}/pull/2501`, undefined, scheme === 'vscode-insiders'));
+        const callback = new URL(redirectLink.searchParams.get('url'));
+        callback.search = redirectLink.search;
+        callback.hash = redirectLink.hash;
+        await handler.handleUri(URI.parse(callback.href));
+        assert.deepEqual(errors, []);
+        assert.deepEqual(deployments, [expected, expected]);
+
+        for (const extra of ['&command=build', '&repo=https://github.com/other/app', '&pr=2502']) {
+            await handler.handleUri(URI.parse(`${deepLink}${extra}`));
+            await handler.handleUri(URI.parse(`${callback.href}${extra}`));
+        }
+        assert.equal(errors.length, 6);
+        assert.deepEqual(deployments, [expected, expected]);
+    }
+});
+
+test('Microsoft redirect links retain private PR fragments for GitHub, GHE and both editors', () => {
+    for (const repository of ['https://github.com/example/app', 'https://dips.ghe.com/dips/Arena.Mobile']) {
+        for (const insiders of [false, true]) {
+            const scheme = insiders ? 'vscode-insiders' : 'vscode';
+            const link = new URL(createPullRequestLink(`${repository}/pull/2501`, undefined, insiders));
+            assert.equal(link.origin, 'https://vscode.dev');
+            assert.equal(link.pathname, '/redirect');
+            assert.deepEqual([...link.searchParams.keys()], ['url']);
+            assert.equal(link.searchParams.get('url'), `${scheme}://FinstadProductions.maui-deploy/deploy-pr`);
+            const parameters = new URLSearchParams(link.hash.slice(1));
+            assert.deepEqual([...parameters.keys()], ['repo', 'pr']);
+            assert.equal(parameters.get('repo'), repository);
+            assert.equal(parameters.get('pr'), '2501');
+            const callback = new URL(link.searchParams.get('url'));
+            callback.search = link.search;
+            callback.hash = link.hash;
+            assert.deepEqual(parseDeployLink(URI.parse(callback.href).toString(true), scheme), parsePullRequestUrl(`${repository}/pull/2501`));
+        }
+    }
+});
+
+test('PR link CLI emits a direct launch and Pages fallback while retaining explicit self-hosted bridges', () => {
+    const cli = path.resolve(__dirname, '../out/branchSetup.js');
+    const pullRequest = 'https://dips.ghe.com/dips/Arena.Mobile/pull/2501';
+    for (const insiders of [false, true]) {
+        const args = [cli, 'pr-link', pullRequest];
+        if (insiders) { args.push('--insiders'); }
+        const output = execFileSync(process.execPath, args, { encoding: 'utf8' });
+        const links = [...output.matchAll(/\]\((https:\/\/[^)]+)\)/g)].map(match => new URL(match[1]));
+        assert.equal(links.length, 2);
+        assert.equal(links[0].origin, 'https://vscode.dev');
+        assert.equal(links[1].origin, 'https://vetle444.github.io');
+        assert.equal(links[1].search, '');
+        const primary = new URLSearchParams(links[0].hash.slice(1));
+        const fallback = new URLSearchParams(links[1].hash.slice(1));
+        assert.equal(primary.get('repo'), fallback.get('repo'));
+        assert.equal(primary.get('pr'), fallback.get('pr'));
+        assert.equal(fallback.get('editor'), insiders ? 'vscode-insiders' : null);
+        const customOutput = execFileSync(process.execPath, [...args, '--bridge', 'https://deploy.example.com/open/'], { encoding: 'utf8' });
+        const customLinks = [...customOutput.matchAll(/\]\((https:\/\/[^)]+)\)/g)].map(match => new URL(match[1]));
+        assert.equal(customLinks.length, 1);
+        assert.equal(customLinks[0].origin, 'https://deploy.example.com');
+        assert.equal(customLinks[0].search, '');
+        assert.equal(new URLSearchParams(customLinks[0].hash.slice(1)).get('editor'), insiders ? 'vscode-insiders' : null);
+    }
+});
+
+test('Microsoft redirect callbacks reject altered targets and mixed or duplicate parameter sources', () => {
+    const target = 'vscode://FinstadProductions.maui-deploy/deploy-pr';
+    const query = new URLSearchParams({ url: target }).toString();
+    const fragment = new URLSearchParams({ repo: 'https://dips.ghe.com/dips/Arena.Mobile', pr: '2501' }).toString();
+    for (const [queryValue, fragmentValue] of [
+        ['', fragment],
+        [fragment, fragment],
+        [`${query}&pr=2502`, fragment],
+        [`${query}&url=${encodeURIComponent(target)}`, fragment],
+        [new URLSearchParams({ url: 'https://other.example/deploy' }).toString(), fragment],
+        [new URLSearchParams({ url: target.replace('/deploy-pr', '/setup') }).toString(), fragment],
+        [new URLSearchParams({ url: target.replace('vscode:', 'vscode-insiders:') }).toString(), fragment],
+        [new URLSearchParams({ url: `${target}?command=run` }).toString(), fragment],
+        [query, `${fragment}&pr=2502`],
+        [query, `${fragment}&repo=https://github.com/other/app`],
+        [query, `${fragment}&returnUrl=https://other.example/`],
+        [query, new URLSearchParams({ repo: 'file:///tmp/app', pr: '2501' }).toString()],
+        [query, ''],
+    ]) {
+        assert.throws(() => parseDeployLink(`${target}?${queryValue}#${fragmentValue}`, 'vscode'));
+    }
+});
+
+function deploymentPageHarness(fragment, rejectProtocol = false) {
+    const filename = path.resolve(__dirname, '../../docs/deploy/index.html');
+    const html = fs.readFileSync(filename, 'utf8');
+    const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+    const elements = new Map(['status', 'target', 'open', 'return'].map(id => [id, { hidden: true }]));
+    const attempts = [];
+    vm.runInNewContext(script, {
+        URL, URLSearchParams,
+        document: { getElementById: id => elements.get(id) },
+        location: {
+            hash: fragment,
+            assign: uri => {
+                assert.equal(elements.get('open').hidden, false);
+                assert.equal(elements.get('return').hidden, false);
+                attempts.push(uri);
+                if (rejectProtocol) { throw new Error('Protocol opening blocked'); }
+            },
+            replace: () => assert.fail('The fallback must not navigate away automatically')
+        },
+        window: {
+            open: () => assert.fail('The fallback must not automatically create another tab'),
+            addEventListener: () => assert.fail('Editor opening must not be inferred from window events')
+        },
+        setTimeout: () => assert.fail('Page load must not schedule a redirect')
+    }, { filename });
+    return { elements, attempts };
+}
+
+test('PR bridge derives a canonical return link and retains both actions when protocol opening is blocked', () => {
+    for (const repo of ['https://github.com/example/app', 'https://dips.ghe.com/dips/Arena.Mobile']) {
+        for (const editor of ['vscode', 'vscode-insiders']) {
+            const parameters = new URLSearchParams({ repo, pr: '2501', editor });
+            for (const rejectProtocol of [false, true]) {
+                const fixture = deploymentPageHarness(`#${parameters}`, rejectProtocol);
+                assert.equal(fixture.attempts.length, 1);
+                assert.deepEqual(parseDeployLink(fixture.attempts[0], editor), parsePullRequestUrl(`${repo}/pull/2501`));
+                assert.equal(fixture.elements.get('open').href, fixture.attempts[0]);
+                assert.equal(fixture.elements.get('return').href, `${repo}/pull/2501`);
+                assert.equal(fixture.elements.get('open').hidden, false);
+                assert.equal(fixture.elements.get('return').hidden, false);
+                assert.match(fixture.elements.get('target').textContent, /PR #2501/);
+            }
+        }
+    }
+});
+
+test('PR bridge rejects invalid fragments without offering a redirect or launching an editor', () => {
+    const valid = 'repo=https%3A%2F%2Fdips.ghe.com%2Fdips%2FArena.Mobile&pr=2501';
+    for (const fragment of [
+        '', '#repo=https://github.com/example/app',
+        `#${valid}&returnUrl=https://other.example/`, `#${valid}&pr=2502`,
+        `#${valid}&repo=https://other.example/app/repo`, `#${valid}&editor=javascript`,
+        '#repo=javascript:alert(1)&pr=2501', '#repo=https://user:secret@example.com/owner/repo&pr=2501',
+        '#repo=https://github.com/owner/repo&pr=../issues', '#repo=https://github.com/owner/repo?next=other&pr=2501'
+    ]) {
+        const fixture = deploymentPageHarness(fragment);
+        assert.equal(fixture.attempts.length, 0);
+        assert.equal(fixture.elements.get('open').href, undefined);
+        assert.equal(fixture.elements.get('return').href, undefined);
+        assert.equal(fixture.elements.get('open').hidden, true);
+        assert.equal(fixture.elements.get('return').hidden, true);
+    }
 });
 
 test('GHE remotes with a custom SSH username match HTTPS PR links without changing Git configuration', async context => {

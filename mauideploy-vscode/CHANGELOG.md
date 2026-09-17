@@ -2,6 +2,15 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 1.6.1 - 2026-09-17
+
+### Changed
+- Generate PR links through Microsoft's HTTP redirect, retaining repository details in the fragment and adding a separate Pages fallback. Keep explicit self-hosted bridges and existing Pages links compatible.
+
+### Fixed
+- Preserve URI query separators when receiving PR links from VS Code, and validate the redirect callback without rejecting its fixed `url` parameter.
+- Keep manual editor-opening and return-to-PR links available on the Pages fallback without automatic tab juggling or navigation away.
+
 ## 1.6.0 - 2026-09-17
 
 ### Added

@@ -2,7 +2,7 @@
   "name": "maui-deploy",
   "displayName": "MauiDeploy",
   "description": "Rider-like toolbar for building, deploying, and debugging with Hot-Reload in .NET MAUI apps",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "author": "FinstadProductions",
   "publisher": "FinstadProductions",
   "license": "MIT",
@@ -221,6 +221,7 @@
     "@types/node": "*",
     "@types/vscode": "*",
     "@vscode/vsce": "^3.9.1",
-    "typescript": "*"
+    "typescript": "*",
+    "vscode-uri": "^3.1.0"
   }
 }

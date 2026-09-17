@@ -4,7 +4,7 @@ import { parseArgs } from 'util';
 import { stdin, stdout } from 'process';
 import { isMauiProject } from './devices';
 import { BranchDeployProfile, readBranchProfile, saveBranchProfile } from './branchProfiles';
-import { createPullRequestLink, listMatchingRemotes, parseRepositoryUrl } from './branchSources';
+import { createPullRequestLink, DEFAULT_PR_BRIDGE_URL, listMatchingRemotes, parseRepositoryUrl } from './branchSources';
 import { getGitRepository, GitRepository, runGit } from './worktrees';
 
 export interface BranchSetupChoice<Value> {
@@ -140,6 +140,10 @@ if (require.main === module) {
                 else { throw new Error(`Unknown or incomplete option: ${option}`); }
             }
             stdout.write(`[Test with MauiDeploy](${createPullRequestLink(value, bridge, insiders)})\n`);
+            if (bridge === undefined) {
+                const fallback = createPullRequestLink(value, DEFAULT_PR_BRIDGE_URL, insiders);
+                stdout.write(`\n[Problems opening?](${fallback})\n`);
+            }
         } catch (error) {
             console.error(error instanceof Error ? error.message : String(error));
             process.exitCode = 1;

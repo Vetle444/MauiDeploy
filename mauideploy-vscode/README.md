@@ -120,22 +120,41 @@ Generate Markdown for a PR description or comment:
 mauideploy pr-link https://github.com/owner/repository/pull/123
 ```
 
-The link opens an HTTPS bridge that automatically invokes
-`vscode://FinstadProductions.maui-deploy/deploy-pr`. MauiDeploy finds the configured
-local repository, fetches the PR and prepares its worktree. After you select a device,
-Debug build, install and launch proceed automatically for a same-repository PR.
-The browser or OS may still ask to open VS Code. A fallback link remains visible if
-automatic opening is blocked. If multiple clones are configured for the same remote,
-you choose the clone.
+The command prints two Markdown links. **Test with MauiDeploy** uses Microsoft's
+existing `https://vscode.dev/redirect` service, which responds with HTTP 302 directly
+to VS Code instead of loading a launcher page. A manual Safari test confirmed that
+the original PR tab remains visible when accepting or cancelling the editor-opening
+prompt. The browser or OS can still require confirmation or block the protocol.
+Other browsers and policies, and machines without VS Code, need separate verification.
 
-The default HTTPS bridge is hosted at `https://vetle444.github.io/MauiDeploy/deploy/`.
-Application repositories do not need their own GitHub Pages setup. The bridge source
-is in `docs/deploy/` in the MauiDeploy repository. Maintainers can update the hosted
-page by manually running **Publish PR Deploy Link Page**. To host the static directory
-elsewhere, enable GitHub Pages with **GitHub Actions** as the source or use another
-HTTPS host, then pass `--bridge https://your-host/deploy/`. Add `--insiders` for VS Code Insiders.
-Repository and PR identifiers are stored in the URL fragment, not sent as query
-parameters to the bridge server; no tokens or local paths are included.
+**Problems opening?** opens the Pages fallback at
+`https://vetle444.github.io/MauiDeploy/deploy/`. It retains a manual editor-opening
+link and a **Tilbake til PR** link even if protocol opening is denied. Returning to
+the PR requires one click and opens the PR in a new tab, preserving the fallback.
+There is no automatic return, popup creation or timeout-based success detection.
+The fallback itself is a regular web page and may replace the current tab; use
+Cmd/Ctrl-click or middle-click to open it in another tab from the start.
+
+New direct links require **MauiDeploy 1.6.1 or newer**. Old
+Pages links remain accepted, but do not acquire the new tab-preserving behavior;
+regenerate existing PR comments or their workflow with the new primary URL format.
+For the direct link, the only query parameter sent to Microsoft is the fixed VS Code
+extension target. Repo and PR identifiers stay in the fragment, which the browser
+inherits on the redirect. The extension validates both the fixed target and the PR
+parameters. No tokens or local paths are included, and no GHE access is granted to
+the redirect service.
+
+MauiDeploy finds the configured local repository, fetches the PR and prepares its
+worktree. After you select a device, Debug build, install and launch proceed
+automatically for a same-repository PR. If multiple clones are configured for the
+same remote, you choose the clone. Setup and device selection remain in VS Code.
+
+Application repositories do not need their own web service or Pages setup. The
+fallback source is in `docs/deploy/`; maintainers update it with **Publish PR Deploy
+Link Page**. To avoid the Microsoft redirect or use a self-hosted launcher, pass
+`--bridge https://your-host/deploy/`: this explicitly retains the original single
+Pages-style link, with no automatic new-tab guarantee. Add `--insiders` for VS Code
+Insiders in either mode.
 
 You can also paste an ordinary PR URL directly into the branch picker.
 Branch/PR deployment currently targets local desktop VS Code with the normal MAUI

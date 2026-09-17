@@ -100,7 +100,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.window.registerUriHandler({
         async handleUri(uri) {
             try {
-                await cmdDeployBranch(parseDeployLink(uri.toString(), vscode.env.uriScheme));
+                await cmdDeployBranch(parseDeployLink(uri.toString(true), vscode.env.uriScheme));
             } catch (error) {
                 void vscode.window.showErrorMessage(`MAUI Deploy: ${error instanceof Error ? error.message : String(error)}`);
             }

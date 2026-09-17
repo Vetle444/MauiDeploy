@@ -5,6 +5,8 @@ import { GitRepository, resolveCommit, runGit } from './worktrees';
 
 const execFileAsync = promisify(execFile);
 
+export const DEFAULT_PR_BRIDGE_URL = 'https://vetle444.github.io/MauiDeploy/deploy/';
+
 export interface RepositoryIdentity {
     host: string;
     owner: string;
@@ -81,30 +83,53 @@ export function parsePullRequestUrl(value: string): PullRequestReference {
 
 export function parseDeployLink(value: string, scheme: string): PullRequestReference {
     const url = new URL(value);
-    if (url.protocol !== `${scheme}:` || url.host.toLowerCase() !== 'finstadproductions.maui-deploy' ||
-        url.pathname !== '/deploy-pr' || url.username || url.password || url.hash) {
+    if (!isDeploymentTarget(url, scheme)) {
         throw new Error('Unsupported MauiDeploy link.');
     }
-    const keys = [...url.searchParams.keys()];
+    const parameters = deploymentParameters(url, scheme);
+    const keys = [...parameters.keys()];
     if (keys.length !== 2 || !keys.includes('repo') || !keys.includes('pr')) {
         throw new Error('A deploy link must contain only repo and pr parameters.');
     }
-    const repository = parseRepositoryUrl(url.searchParams.get('repo')!);
-    return parsePullRequestUrl(`${repository.url}/pull/${url.searchParams.get('pr')}`);
+    const repository = parseRepositoryUrl(parameters.get('repo')!);
+    return parsePullRequestUrl(`${repository.url}/pull/${parameters.get('pr')}`);
+}
+
+function isDeploymentTarget(url: URL, scheme: string): boolean {
+    return url.protocol === `${scheme}:` && url.host.toLowerCase() === 'finstadproductions.maui-deploy' &&
+        url.pathname === '/deploy-pr' && !url.username && !url.password;
+}
+
+function deploymentParameters(url: URL, scheme: string): URLSearchParams {
+    if (!url.hash) { return url.searchParams; }
+    const queryKeys = [...url.searchParams.keys()];
+    if (queryKeys.length !== 1 || queryKeys[0] !== 'url') {
+        throw new Error('A redirect link must contain only its fixed VS Code target and repo/pr fragment.');
+    }
+    const target = new URL(url.searchParams.get('url')!);
+    if (!isDeploymentTarget(target, scheme) || target.search || target.hash) {
+        throw new Error('Unsupported MauiDeploy redirect target.');
+    }
+    return new URLSearchParams(url.hash.slice(1));
 }
 
 export function createPullRequestLink(
     value: string,
-    bridge = 'https://vetle444.github.io/MauiDeploy/deploy/',
+    bridge?: string,
     insiders = false
 ): string {
     const reference = parsePullRequestUrl(value);
-    const url = new URL(bridge);
+    const url = new URL(bridge ?? 'https://vscode.dev/redirect');
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) {
         throw new Error('The PR link bridge must be an HTTPS URL without credentials, query or fragment.');
     }
     const parameters = new URLSearchParams({ repo: reference.repository.url, pr: String(reference.number) });
-    if (insiders) { parameters.set('editor', 'vscode-insiders'); }
+    if (bridge === undefined) {
+        const scheme = insiders ? 'vscode-insiders' : 'vscode';
+        url.searchParams.set('url', `${scheme}://FinstadProductions.maui-deploy/deploy-pr`);
+    } else if (insiders) {
+        parameters.set('editor', 'vscode-insiders');
+    }
     url.hash = parameters.toString();
     return url.toString();
 }
