@@ -4,6 +4,7 @@ import { buildAndDeploy, BuildResult } from './deployer';
 import { detectPlatforms, detectAllDevices, bootSimulator, Device, Platform } from './devices';
 import { BranchDeployProfile, readBranchProfile, readBranchProfiles, resolveDeploymentProject, saveBranchProfile } from './branchProfiles';
 import { configureBranchDeploy } from './branchSetup';
+import { BranchPrerequisites } from './prerequisiteSetup';
 import {
     BranchReference, PullRequestReference, parseRepositoryUrl, parsePullRequestUrl, sameRepository,
     listBranches, listMatchingRemotes, resolveBranchCommit, getPullRequestHead, fetchPullRequestCommit
@@ -28,7 +29,10 @@ export function registerBranchSetup(context: vscode.ExtensionContext, currentPro
             return;
         }
         const abort = new AbortController();
+        const cancellation = new vscode.CancellationTokenSource();
         try {
+            const prerequisites = new BranchPrerequisites(context, cancellation.token, abort.signal, () => {});
+            await prerequisites.ensureSourceTools();
             const repository = await selectWorkspaceRepository(currentProject());
             const profile = await setupDeploymentProfile(repository, abort.signal);
             void vscode.window.showInformationMessage(`Branch deployment configured: ${profile.projectPath} / ${profile.configuration}`);
@@ -38,6 +42,7 @@ export function registerBranchSetup(context: vscode.ExtensionContext, currentPro
             }
         } finally {
             abort.abort();
+            cancellation.dispose();
         }
     }));
 }
@@ -55,6 +60,8 @@ export async function deployBranch(
     if (token.isCancellationRequested) { abort.abort(); }
     try {
         abort.signal.throwIfAborted();
+        const prerequisites = new BranchPrerequisites(context, token, abort.signal, report);
+        await prerequisites.ensureSourceTools(pullRequest?.repository.host);
         const { repository, profile } = await selectDeploymentProfile(abort.signal, currentProject, pullRequest);
         abort.signal.throwIfAborted();
         const actualRemote = parseRepositoryUrl(await runGit(repository.root, ['remote', 'get-url', profile.remote], abort.signal));
@@ -71,6 +78,7 @@ export async function deployBranch(
             if (!sameRepository(reference.repository, actualRemote)) {
                 throw new Error('This PR belongs to a different repository. Open or configure its repository first.');
             }
+            await prerequisites.ensureGitHub(reference.repository.host);
             report(`Reading PR #${reference.number}`);
             const head = await getPullRequestHead(reference, abort.signal);
             if (!sameRepository(head.repository, actualRemote)) {
@@ -93,10 +101,11 @@ export async function deployBranch(
         report(`Preparing ${label} (${commit.slice(0, 8)})`);
         return await withDeploymentWorktree(repository, commit, async directory => {
             const project = await resolveDeploymentProject(directory, profile.projectPath);
-            const platforms = detectPlatforms(project);
+            const platforms = await prerequisites.prepareDevicePlatforms(detectPlatforms(project));
             report(`Selecting device for ${label}`);
             const device = await pickDeploymentDevice(platforms, profile, label, token);
             const platform = platforms.find(candidate => candidate.name === device.platform)!;
+            const dotnetPath = await prerequisites.ensureBuildTools(project, platform);
             await saveBranchProfile({
                 ...profile,
                 device: { id: device.id, name: device.name, platform: device.platform, type: device.type }
@@ -110,7 +119,7 @@ export async function deployBranch(
             const title = `${label} (${commit.slice(0, 8)}) / ${profile.configuration} / ${device.name}`;
             report(`Building ${title}`);
             const result = await buildAndDeploy(project, platform, device, profile.configuration, token,
-                (elapsedMs, percent) => report(title, elapsedMs, percent), 'MAUI Deploy - Branch');
+                (elapsedMs, percent) => report(title, elapsedMs, percent), 'MAUI Deploy - Branch', dotnetPath);
             if (result.success) { void vscode.window.showInformationMessage(`Deployed ${title}`); }
             return result;
         }, abort.signal);

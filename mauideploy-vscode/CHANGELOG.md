@@ -2,6 +2,16 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 1.6.2 - 2026-09-17
+
+### Added
+- Check Git and host-specific GitHub CLI sign-in before branch/PR operations, and Xcode readiness before iOS device discovery.
+- Check the SDK and MAUI iOS workloads from the selected worktree, with native install/instruction/recheck actions that resume the same deployment.
+- Offer consent-based Homebrew tool installation, isolated side-by-side .NET SDK installation and non-privileged workload installation without changing project SDK policy or system SDKs.
+
+### Fixed
+- Use the SDK selected by the branch prerequisite check consistently for iOS restore, registrar clean and build; preserve ordinary Run/Debug behavior.
+
 ## 1.6.1 - 2026-09-17
 
 ### Changed

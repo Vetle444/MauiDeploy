@@ -7,6 +7,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { Platform, Device, findIosAppBundle, findAndroidApk, getAndroidPackageId, getBundleId, getAndroidRuntimeIdentifier } from './devices';
 import { AndroidBuildOptions, androidBuildProperties, androidDeploymentTargets, androidPhaseTimings } from './androidBuild';
+import { dotnetEnvironment } from './prerequisites';
 
 const execFileAsync = promisify(execFile);
 
@@ -28,7 +29,7 @@ interface BuildFailureContext {
 let lastBuildFailure: BuildFailureContext | undefined;
 const projectBuilds = new Map<string, Promise<void>>();
 
-function getBuildTerminal(fresh = true, name = defaultBuildTerminalName, cwd?: string): vscode.Terminal {
+function getBuildTerminal(fresh = true, name = defaultBuildTerminalName, cwd?: string, dotnetPath?: string): vscode.Terminal {
     const existing = buildTerminals.get(name);
     if (fresh && existing && !existing.exitStatus) {
         existing.dispose();
@@ -39,6 +40,7 @@ function getBuildTerminal(fresh = true, name = defaultBuildTerminalName, cwd?: s
     const terminal = vscode.window.createTerminal({
         name,
         cwd,
+        env: dotnetPath ? dotnetEnvironment(dotnetPath) : undefined,
         iconPath: new vscode.ThemeIcon('rocket')
     });
     buildTerminals.set(name, terminal);
@@ -66,7 +68,8 @@ export async function buildAndDeploy(
     config: string,
     token?: vscode.CancellationToken,
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
-    terminalName?: string
+    terminalName?: string,
+    dotnetPath?: string
 ): Promise<BuildResult> {
     const projectKey = path.resolve(projectPath);
     const previous = projectBuilds.get(projectKey) ?? Promise.resolve();
@@ -76,8 +79,8 @@ export async function buildAndDeploy(
         }
         if (platform.name === 'iOS') {
             return device.type === 'physical'
-                ? buildAndDeployIosDevice(projectPath, platform, device, config, token, onProgress, terminalName)
-                : buildAndDeployIos(projectPath, platform, device, config, token, onProgress, terminalName);
+                ? buildAndDeployIosDevice(projectPath, platform, device, config, token, onProgress, terminalName, dotnetPath)
+                : buildAndDeployIos(projectPath, platform, device, config, token, onProgress, terminalName, dotnetPath);
         }
         return buildAndDeployAndroid(projectPath, platform, device, config, token, onProgress, terminalName);
     });
@@ -112,17 +115,19 @@ async function buildAndDeployIos(
     config: string,
     token?: vscode.CancellationToken,
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
-    terminalName?: string
+    terminalName?: string,
+    dotnetPath?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath));
+    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath), dotnetPath);
     terminal.show();
 
+    const dotnet = dotnetPath ? shellQuote(dotnetPath) : 'dotnet';
     const shared = sharedBuildProps(projectPath);
     const noRestore = restoreFlag(projectPath, platform);
     const started = Date.now();
     const result = await runIosBuildCommand(terminal, projectPath, logArgs => {
         const fastProps = iosFastBuildProps(projectPath, config, 'simulator').join(' ');
-        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${fastProps} ${shared} ${logArgs}`;
+        const buildCmd = `${dotnet} build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${fastProps} ${shared} ${logArgs}`;
         return `echo '▶ Building...' && ${buildCmd}`;
     }, 600_000, token, onProgress);
     if (!result.success) {
@@ -188,19 +193,21 @@ async function buildAndDeployIosDevice(
     config: string,
     token?: vscode.CancellationToken,
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
-    terminalName?: string
+    terminalName?: string,
+    dotnetPath?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath));
+    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath), dotnetPath);
     terminal.show();
 
+    const dotnet = dotnetPath ? shellQuote(dotnetPath) : 'dotnet';
     // Build for physical device (needs RuntimeIdentifier ios-arm64)
     const shared = sharedBuildProps(projectPath);
     const noRestore = restoreFlag(projectPath, platform);
     const started = Date.now();
     const result = await runIosPhysicalBuild(terminal, projectPath, platform.framework, config, (logArgs, fastProps, runtimeIdentifier) => {
-        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -r ${runtimeIdentifier} ${fastProps} ${shared} ${logArgs}`;
+        const buildCmd = `${dotnet} build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -r ${runtimeIdentifier} ${fastProps} ${shared} ${logArgs}`;
         return `echo '▶ Building for device...' && ${buildCmd}`;
-    }, 600_000, token, onProgress);
+    }, 600_000, token, onProgress, dotnetPath);
     if (!result.success) {
         return result;
     }
@@ -314,7 +321,8 @@ async function runIosPhysicalBuild(
     commandFactory: (logArgs: string, fastProps: string, runtimeIdentifier: string) => string,
     timeout: number,
     token?: vscode.CancellationToken,
-    onProgress?: (elapsedMs: number, buildPercent: number) => void
+    onProgress?: (elapsedMs: number, buildPercent: number) => void,
+    dotnetPath?: string
 ): Promise<BuildResult> {
     const started = Date.now();
     const runtimeIdentifier = 'ios-arm64';
@@ -337,7 +345,7 @@ async function runIosPhysicalBuild(
                 fs.writeFileSync(stateFile, 'pending');
                 reportIosTiming(`Registrar changed or unknown; restoring and cleaning ${config} ${framework} ${runtimeIdentifier} output for ${mode} mode.`);
                 const clean = await restoreAndCleanProject(terminal, projectPath, framework, config,
-                    runtimeIdentifier, properties, timeout, token);
+                    runtimeIdentifier, properties, timeout, token, dotnetPath);
                 if (!clean.success) { return clean; }
             }
         } catch (error) {
@@ -367,16 +375,18 @@ async function restoreAndCleanProject(
     runtimeIdentifier: string,
     properties: string[],
     timeout: number,
-    token?: vscode.CancellationToken
+    token?: vscode.CancellationToken,
+    dotnetPath?: string
 ): Promise<BuildResult> {
+    const dotnet = dotnetPath ? shellQuote(dotnetPath) : 'dotnet';
     const targetArgs = `-r ${shellQuote(runtimeIdentifier)} ${properties.join(' ')}`;
     const restore = await runTerminalCommand(terminal,
-        `dotnet restore ${shellQuote(projectPath)} -p:TargetFramework=${shellQuote(framework)} -p:Configuration=${shellQuote(config)} ${targetArgs}`,
+        `${dotnet} restore ${shellQuote(projectPath)} -p:TargetFramework=${shellQuote(framework)} -p:Configuration=${shellQuote(config)} ${targetArgs}`,
         timeout, undefined, showBuildErrors, token);
     if (!restore.success) { return restore; }
 
     const clean = await runTerminalCommand(terminal,
-        `dotnet clean ${shellQuote(projectPath)} -f ${shellQuote(framework)} -c ${shellQuote(config)} ${targetArgs}`,
+        `${dotnet} clean ${shellQuote(projectPath)} -f ${shellQuote(framework)} -c ${shellQuote(config)} ${targetArgs}`,
         timeout, undefined, showBuildErrors, token);
     return { ...clean, durationMs: restore.durationMs + clean.durationMs };
 }

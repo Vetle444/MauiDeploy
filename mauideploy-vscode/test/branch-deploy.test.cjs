@@ -409,6 +409,7 @@ function deploymentHarness() {
         remoteUrl: profile.repositoryUrl, cancelPicker: false, remoteOffline: false,
         hasProfile: true, setupResult: 'success', setupCalls: [], folderPicks: 0,
         devicePicks: [], profileWrites: [], cancelDevice: false, abortDevice: false,
+        prerequisiteChecks: [], selectedDotnet: '/managed/dotnet/dotnet',
         projects: ['src/App.csproj', 'src/Other.csproj'], remotes: ['origin'], commands: new Map(), failures: [],
         platforms: [{ name: 'iOS', framework: 'net10.0-ios' }],
         workspaceFolders: [{ uri: { fsPath: root } }],
@@ -499,6 +500,21 @@ function deploymentHarness() {
                     },
                     resolveDeploymentProject: async (directory, relative) => path.join(directory, relative)
                 };
+            }
+            if (name === './prerequisiteSetup') {
+                const check = (phase, ...args) => {
+                    fixture.prerequisiteChecks.push({ phase, args });
+                    if (fixture.blockedPrerequisite === phase) { throw new Error('Prerequisites unresolved or cancelled'); }
+                };
+                return { BranchPrerequisites: class {
+                    async ensureSourceTools(host) { check('source', host); }
+                    async ensureGitHub(host) { check('github', host); }
+                    async prepareDevicePlatforms(platforms) { check('devices', platforms); return platforms; }
+                    async ensureBuildTools(project, platform) {
+                        check('build', project, platform);
+                        return platform.name === 'iOS' ? fixture.selectedDotnet : undefined;
+                    }
+                } };
             }
             if (name === './branchSetup') {
                 if (!setupModule) {
@@ -594,6 +610,28 @@ test('every branch and PR deployment requires device selection, even with only o
         assert.equal(fixture.confirms.length, 0);
         assert.ok(fixture.devicePicks.every(items => items.length === 1));
     }
+});
+
+test('PR prerequisites gate fetching, device discovery and building without losing the original request', async () => {
+    for (const phase of ['source', 'github', 'devices', 'build']) {
+        const fixture = deploymentHarness();
+        fixture.blockedPrerequisite = phase;
+        await assert.rejects(fixture.run(fixture.reference), /Prerequisites/);
+        assert.equal(fixture.builds.length, 0);
+        assert.equal(fixture.profileWrites.length, 0);
+        if (['source', 'github'].includes(phase)) { assert.equal(fixture.fetches.length, 0); }
+        if (phase !== 'build') { assert.equal(fixture.devicePicks.length, 0); }
+    }
+    const fixture = deploymentHarness();
+    await fixture.run(fixture.reference);
+    assert.deepEqual(fixture.prerequisiteChecks.map(check => check.phase), ['source', 'github', 'devices', 'build']);
+    assert.equal(fixture.prerequisiteChecks[0].args[0], 'github.com');
+    assert.equal(fixture.fetches[0][2], fixture.reference);
+    assert.equal(fixture.prerequisiteChecks[3].args[0], path.join(fixture.repository.worktreePath, 'src/App.csproj'));
+    assert.equal(fixture.builds[0][7], fixture.selectedDotnet);
+    const branch = deploymentHarness();
+    await branch.run();
+    assert.ok(!branch.prerequisiteChecks.some(check => check.phase === 'github'));
 });
 
 test('device choice can switch platforms, remembers the last choice and excludes unavailable or unsupported targets', async () => {

@@ -106,6 +106,61 @@ Deploying the same application ID replaces the installed app. Custom absolute ou
 paths and references outside the repository are not isolated by Git. Ignored local
 configuration and signing files are not copied from the development checkout.
 
+### Dependency Checks (macOS/iOS)
+
+Branch/PR deployment checks prerequisites before the stage that needs them:
+
+- Git before repository selection or worktree creation.
+- GitHub CLI and sign-in to the PR's exact host before PR lookup/fetch. Local branch
+	deployment does not require GitHub CLI. Git still uses its existing credentials.
+- Full selected Xcode, completed first-use setup, `simctl`, `devicectl` and the iOS
+	SDK before iOS device discovery. Missing Xcode does not force Android users to
+	install it: a multi-platform project can continue with Android for that deployment.
+- A .NET SDK resolved by `dotnet --version` from the **worktree project's directory**,
+	followed by that SDK's installed MAUI iOS workloads, before any iOS build.
+
+Missing prerequisites open a native menu with installation, setup instructions and
+**Recheck** actions. Installation requires explicit confirmation. After installation
+or a successful sign-in, the checks run again and the same deployment continues.
+Closing the menu, declining installation or stopping the operation never starts a
+build. Device selection remains mandatory for every deployment.
+
+On macOS, missing Git or `gh` can be installed using existing Homebrew. Homebrew itself
+is not installed automatically. GitHub sign-in runs in a dedicated user-operated
+terminal; passwords, tokens and authentication output are not read into diagnostics.
+The extension does not configure Git credentials or SSH keys.
+
+Missing SDKs use Microsoft's official HTTPS `dotnet-install.sh` installer in private
+extension storage (`prerequisites/dotnet/`). The requested version is installed beside
+existing SDKs; when there is no pinned SDK, the target framework's SDK channel is used.
+A staging installation must resolve successfully in the worktree before activation.
+Neither `global.json`, the original repository, nor the system's .NET installation
+or global PATH is rewritten. The selected executable is used explicitly for restore,
+registrar clean and build. A private installed SDK takes priority on later deployments
+for the same SDK requirement.
+
+If MAUI iOS workloads are missing, MauiDeploy can install `maui-ios` with the selected
+SDK using `--skip-manifest-update`. Administrator-managed SDKs offer a private copy
+first instead of invoking `sudo`. Installations are serialized across VS Code windows;
+cancellation stops the owned installer process group and removes incomplete SDK
+staging. A crash may leave `prerequisites/install.lock`; remove it only after confirming
+that no dependency installation is still running. Downloads can require substantial
+disk space and network access. Existing managed SDK directories are not overwritten.
+
+Xcode installation/selection, license acceptance, simulator runtimes, physical-device
+pairing/Developer Mode, signing identities, private NuGet access and corporate network
+requirements remain user-managed. The preflight checks basic Xcode readiness; exact
+Xcode/workload-version compatibility and project-specific requirements are still
+validated by the normal build. Ambiguous SDK configuration (for example custom SDK
+search paths or a configuration file the installer cannot parse) gets manual guidance
+instead of a guessed installation. No automatic SDK-policy or workload upgrade occurs.
+
+This first preflight version covers macOS/iOS branch and PR deployment and native
+branch setup. Ordinary Run/Debug and the optional terminal setup command retain their
+existing behavior. Automatic Android JDK/SDK setup and remote extension hosts are not
+covered. VS Code's bundled runtime runs the extension and CLI; users need no separate
+Node/npm installation, C# Dev Kit or separately installed MauiDeploy debug adapter.
+
 ### PR Links
 
 GitHub CLI (`gh`) must be installed and authenticated for the repository's host;
