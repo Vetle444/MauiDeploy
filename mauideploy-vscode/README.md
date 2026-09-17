@@ -101,15 +101,16 @@ without further picks for an authorized same-repository PR. The browser or OS ma
 still ask to open VS Code. A fallback link remains visible if automatic opening is
 blocked. If multiple clones are configured for the same remote, you choose the clone.
 
-**The default HTTPS bridge must be published before generated links work.** Its
-source is in `docs/deploy/` in the MauiDeploy repository. Enable GitHub Pages with
-**GitHub Actions** as the source, then manually run **Publish PR Deploy Link Page**.
-This does not happen during extension installation. To host the static directory
-elsewhere, pass `--bridge https://your-host/deploy/`. Add `--insiders` for VS Code Insiders.
+The default HTTPS bridge is hosted at `https://vetle444.github.io/MauiDeploy/deploy/`.
+Application repositories do not need their own GitHub Pages setup. The bridge source
+is in `docs/deploy/` in the MauiDeploy repository. Maintainers can update the hosted
+page by manually running **Publish PR Deploy Link Page**. To host the static directory
+elsewhere, enable GitHub Pages with **GitHub Actions** as the source or use another
+HTTPS host, then pass `--bridge https://your-host/deploy/`. Add `--insiders` for VS Code Insiders.
 Repository and PR identifiers are stored in the URL fragment, not sent as query
 parameters to the bridge server; no tokens or local paths are included.
 
-Until the bridge is published, paste an ordinary PR URL into the branch picker.
+You can also paste an ordinary PR URL directly into the branch picker.
 Branch/PR deployment currently targets local desktop VS Code with the normal MAUI
 toolchain and device prerequisites; remote extension hosts have not been verified.
 
