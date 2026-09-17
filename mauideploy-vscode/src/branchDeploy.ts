@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { buildAndDeploy, BuildResult } from './deployer';
-import { detectPlatforms, detectAllDevices, bootSimulator } from './devices';
-import { BranchDeployProfile, readBranchProfile, readBranchProfiles, resolveDeploymentProject } from './branchProfiles';
+import { detectPlatforms, detectAllDevices, bootSimulator, Device, Platform } from './devices';
+import { BranchDeployProfile, readBranchProfile, readBranchProfiles, resolveDeploymentProject, saveBranchProfile } from './branchProfiles';
+import { configureBranchDeploy } from './branchSetup';
 import {
     BranchReference, PullRequestReference, parseRepositoryUrl, parsePullRequestUrl, sameRepository,
-    listBranches, resolveBranchCommit, getPullRequestHead, fetchPullRequestCommit
+    listBranches, listMatchingRemotes, resolveBranchCommit, getPullRequestHead, fetchPullRequestCommit
 } from './branchSources';
 import { getGitRepository, GitRepository, runGit, withDeploymentWorktree } from './worktrees';
 
@@ -16,23 +17,28 @@ interface BranchPickItem extends vscode.QuickPickItem {
     source?: DeploymentSource;
 }
 
-export function registerBranchSetup(context: vscode.ExtensionContext): void {
+export function registerBranchSetup(context: vscode.ExtensionContext, currentProject: () => string | undefined): void {
     const environment = context.environmentVariableCollection;
     environment.prepend('PATH', `${context.asAbsolutePath('cli')}${path.delimiter}`);
     environment.replace('MAUIDEPLOY_NODE', process.execPath);
     environment.replace('MAUIDEPLOY_CLI', context.asAbsolutePath('out/branchSetup.js'));
-    context.subscriptions.push(vscode.commands.registerCommand('mauideploy.setupBranchDeploy', () => {
+    context.subscriptions.push(vscode.commands.registerCommand('mauideploy.setupBranchDeploy', async () => {
         if (!vscode.workspace.isTrusted) {
             void vscode.window.showErrorMessage('Trust this workspace before configuring branch deployment.');
             return;
         }
-        const terminal = vscode.window.createTerminal({
-            name: 'MAUI Deploy - Setup',
-            cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-            iconPath: new vscode.ThemeIcon('settings-gear')
-        });
-        terminal.show();
-        terminal.sendText('mauideploy setup');
+        const abort = new AbortController();
+        try {
+            const repository = await selectWorkspaceRepository(currentProject());
+            const profile = await setupDeploymentProfile(repository, abort.signal);
+            void vscode.window.showInformationMessage(`Branch deployment configured: ${profile.projectPath} / ${profile.configuration}`);
+        } catch (error) {
+            if (!(error instanceof vscode.CancellationError)) {
+                void vscode.window.showErrorMessage(`MAUI Deploy: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        } finally {
+            abort.abort();
+        }
     }));
 }
 
@@ -49,10 +55,11 @@ export async function deployBranch(
     if (token.isCancellationRequested) { abort.abort(); }
     try {
         abort.signal.throwIfAborted();
-        const { repository, profile } = await selectDeploymentProfile(currentProject, pullRequest);
+        const { repository, profile } = await selectDeploymentProfile(abort.signal, currentProject, pullRequest);
+        abort.signal.throwIfAborted();
         const actualRemote = parseRepositoryUrl(await runGit(repository.root, ['remote', 'get-url', profile.remote], abort.signal));
         if (!sameRepository(actualRemote, parseRepositoryUrl(profile.repositoryUrl))) {
-            throw new Error('The configured Git remote has changed. Run mauideploy setup again.');
+            throw new Error('The configured Git remote has changed. Use MAUI Deploy: Set Up Branch Deployment to configure it again.');
         }
         const source = pullRequest ? { pullRequest } : await pickBranch(context, repository, profile, abort.signal);
         if (!source) { return undefined; }
@@ -66,9 +73,9 @@ export async function deployBranch(
             }
             report(`Reading PR #${reference.number}`);
             const head = await getPullRequestHead(reference, abort.signal);
-            if (!profile.allowAutomaticPullRequests || !sameRepository(head.repository, actualRemote)) {
+            if (!sameRepository(head.repository, actualRemote)) {
                 const answer = await vscode.window.showWarningMessage(
-                    `Build and deploy PR #${reference.number} from ${head.repository.url} to ${profile.device.name}? ` +
+                    `Build and deploy PR #${reference.number} from ${head.repository.url}? ` +
                     'Restore and build can execute code on this machine. The installed app with the same ID will be replaced.',
                     { modal: true }, 'Build & Deploy'
                 );
@@ -87,14 +94,13 @@ export async function deployBranch(
         return await withDeploymentWorktree(repository, commit, async directory => {
             const project = await resolveDeploymentProject(directory, profile.projectPath);
             const platforms = detectPlatforms(project);
-            const platform = platforms.find(candidate => candidate.name === profile.device.platform);
-            if (!platform) { throw new Error(`${profile.projectPath} does not target ${profile.device.platform} in this branch.`); }
-            report(`Connecting to ${profile.device.name}`);
-            const devices = await detectAllDevices([platform]);
-            const device = devices.find(candidate => candidate.id === profile.device.id && candidate.type === profile.device.type);
-            if (!device || device.available === false) {
-                throw new Error(`${profile.device.name} is unavailable. Connect it, or run mauideploy setup to choose another device.`);
-            }
+            report(`Selecting device for ${label}`);
+            const device = await pickDeploymentDevice(platforms, profile, label, token);
+            const platform = platforms.find(candidate => candidate.name === device.platform)!;
+            await saveBranchProfile({
+                ...profile,
+                device: { id: device.id, name: device.name, platform: device.platform, type: device.type }
+            });
             abort.signal.throwIfAborted();
             if (device.platform === 'iOS' && device.type === 'simulator' && device.state === 'Shutdown') {
                 report(`Starting ${device.name}`);
@@ -114,14 +120,57 @@ export async function deployBranch(
     }
 }
 
-async function selectDeploymentProfile(currentProject?: string, pullRequest?: PullRequestReference): Promise<{
+async function pickDeploymentDevice(
+    platforms: Platform[],
+    profile: BranchDeployProfile,
+    label: string,
+    token: vscode.CancellationToken
+): Promise<Device> {
+    if (token.isCancellationRequested) { throw new vscode.CancellationError(); }
+    if (platforms.length === 0) { throw new Error('This project does not target iOS or Android in the selected branch.'); }
+    const devices = (await detectAllDevices(platforms)).filter(device => device.available !== false);
+    if (token.isCancellationRequested) { throw new vscode.CancellationError(); }
+    if (devices.length === 0) { throw new Error('No available devices for this project. Connect a device or create an iOS simulator and try again.'); }
+    const previous = devices.find(device => device.id === profile.device?.id &&
+        device.platform === profile.device.platform && device.type === profile.device.type);
+    const itemForDevice = (device: Device) => ({
+        label: `$(${device.type === 'simulator' ? 'vm' : 'device-mobile'}) ${device.display}`,
+        description: device.state, device
+    });
+    const items: (vscode.QuickPickItem & { device?: Device })[] = [];
+    if (previous) {
+        items.push({ label: 'Last Used', kind: vscode.QuickPickItemKind.Separator }, itemForDevice(previous));
+    }
+    for (const platform of platforms) {
+        const group = devices.filter(device => device.platform === platform.name && device !== previous);
+        if (group.length > 0) {
+            items.push({ label: platform.name, kind: vscode.QuickPickItemKind.Separator }, ...group.map(itemForDevice));
+        }
+    }
+    const choice = await vscode.window.showQuickPick(items, {
+        title: `Deploy ${label}: Device`, placeHolder: `${profile.projectPath} / ${profile.configuration}`,
+        matchOnDescription: true, ignoreFocusOut: true
+    }, token);
+    if (!choice?.device || token.isCancellationRequested) { throw new vscode.CancellationError(); }
+    return choice.device;
+}
+
+async function selectDeploymentProfile(
+    signal: AbortSignal,
+    currentProject?: string,
+    pullRequest?: PullRequestReference
+): Promise<{
     repository: GitRepository;
     profile: BranchDeployProfile;
 }> {
     if (pullRequest) {
         const profiles = (await readBranchProfiles()).filter(profile =>
             sameRepository(parseRepositoryUrl(profile.repositoryUrl), pullRequest.repository));
-        if (profiles.length === 0) { throw new Error('No deployment setup for this PR repository. Run mauideploy setup in its local clone first.'); }
+        if (profiles.length === 0) {
+            const repository = await findPullRequestRepository(pullRequest, signal, currentProject);
+            const profile = await setupDeploymentProfile(repository, signal, pullRequest.repository.url);
+            return { repository, profile };
+        }
         let profile = profiles[0];
         if (profiles.length > 1) {
             const choice = await vscode.window.showQuickPick(profiles.map(candidate => ({
@@ -131,23 +180,99 @@ async function selectDeploymentProfile(currentProject?: string, pullRequest?: Pu
             profile = choice.profile;
         }
         const repository = await getGitRepository(profile.repositoryRoot);
-        if (repository.commonDirectory !== profile.commonDirectory) { throw new Error('The configured local repository has changed. Run mauideploy setup again.'); }
+        if (repository.commonDirectory !== profile.commonDirectory) { throw new Error('The configured local repository has changed. Use MAUI Deploy: Set Up Branch Deployment to configure it again.'); }
         return { repository, profile };
     }
+    const repository = await selectWorkspaceRepository(currentProject);
+    const profile = await readBranchProfile(repository) ?? await setupDeploymentProfile(repository, signal);
+    return { repository, profile };
+}
+
+async function selectWorkspaceRepository(currentProject?: string): Promise<GitRepository> {
     let directory = currentProject ? path.dirname(currentProject) : undefined;
     if (!directory) {
         const folders = vscode.workspace.workspaceFolders ?? [];
         if (folders.length === 1) { directory = folders[0].uri.fsPath; }
         if (folders.length > 1) {
             const choice = await vscode.window.showWorkspaceFolderPick({ placeHolder: 'Repository to deploy from' });
+            if (!choice) { throw new vscode.CancellationError(); }
             directory = choice?.uri.fsPath;
         }
     }
-    if (!directory) { throw new Error('Open your application repository and run mauideploy setup first.'); }
-    const repository = await getGitRepository(directory);
-    const profile = await readBranchProfile(repository);
-    if (!profile) { throw new Error('Run mauideploy setup in a new VS Code terminal to select a project, configuration and device.'); }
-    return { repository, profile };
+    if (!directory) { throw new Error('Open your application repository to configure branch deployment.'); }
+    return getGitRepository(directory);
+}
+
+async function findPullRequestRepository(
+    reference: PullRequestReference,
+    signal: AbortSignal,
+    currentProject?: string
+): Promise<GitRepository> {
+    const directories = (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath);
+    if (currentProject) { directories.unshift(path.dirname(currentProject)); }
+    const repositories = new Map<string, GitRepository>();
+    for (const directory of new Set(directories)) {
+        signal.throwIfAborted();
+        try {
+            const repository = await getGitRepository(directory);
+            const remotes = await listMatchingRemotes(repository, reference.repository, signal);
+            if (remotes.length > 0) {
+                repositories.set(repository.commonDirectory, repository);
+            }
+        } catch (error) {
+            if (signal.aborted) { throw error; }
+        }
+    }
+    if (repositories.size === 1) { return [...repositories.values()][0]; }
+    if (repositories.size > 1) {
+        const choice = await vscode.window.showQuickPick([...repositories.values()].map(repository => ({
+            label: `$(repo) ${path.basename(repository.root)}`, description: repository.root, repository
+        })), { title: 'Set Up PR Deployment: Repository', matchOnDescription: true });
+        if (!choice) { throw new vscode.CancellationError(); }
+        return choice.repository;
+    }
+    signal.throwIfAborted();
+    const selected = await vscode.window.showOpenDialog({
+        title: `Select a local clone of ${reference.repository.owner}/${reference.repository.name}`,
+        openLabel: 'Set Up Deployment', canSelectFiles: false, canSelectFolders: true, canSelectMany: false
+    });
+    if (!selected?.[0]) { throw new vscode.CancellationError(); }
+    signal.throwIfAborted();
+    const repository = await getGitRepository(selected[0].fsPath);
+    const remotes = await listMatchingRemotes(repository, reference.repository, signal);
+    if (remotes.length === 0) {
+        throw new Error(`The selected folder has no Git remote for ${reference.repository.url}. Select its local clone.`);
+    }
+    return repository;
+}
+
+async function setupDeploymentProfile(
+    repository: GitRepository,
+    signal: AbortSignal,
+    expectedRepositoryUrl?: string
+): Promise<BranchDeployProfile> {
+    signal.throwIfAborted();
+    const cancellation = new vscode.CancellationTokenSource();
+    const cancel = () => cancellation.cancel();
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+        return await configureBranchDeploy(repository, async (title, choices, preferredIndex) => {
+            const ordered = [...choices];
+            if (preferredIndex > 0) { ordered.unshift(...ordered.splice(preferredIndex, 1)); }
+            const icons: Record<string, string> = { 'Git Remote': 'repo', Project: 'file-code' };
+            const selection = await vscode.window.showQuickPick(ordered.map(choice => ({
+                label: `$(${icons[title]}) ${choice.label}`, description: choice.description, choice
+            })), {
+                title: `Branch Deployment: ${title}`, placeHolder: repository.root,
+                matchOnDescription: true, ignoreFocusOut: true
+            }, cancellation.token);
+            if (!selection) { throw new vscode.CancellationError(); }
+            return selection.choice.value;
+        }, expectedRepositoryUrl, signal);
+    } finally {
+        signal.removeEventListener('abort', cancel);
+        cancellation.dispose();
+    }
 }
 
 async function pickBranch(
@@ -157,7 +282,7 @@ async function pickBranch(
     signal: AbortSignal
 ): Promise<DeploymentSource | undefined> {
     const picker = vscode.window.createQuickPick<BranchPickItem>();
-    picker.title = `Deploy Branch: ${profile.projectPath} / ${profile.configuration} / ${profile.device.name}`;
+    picker.title = `Deploy Branch: ${profile.projectPath} / ${profile.configuration}`;
     picker.placeholder = 'Search branches or paste a GitHub PR URL';
     picker.matchOnDescription = true;
     picker.ignoreFocusOut = true;

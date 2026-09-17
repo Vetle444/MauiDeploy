@@ -28,8 +28,8 @@ export interface BranchReference {
 }
 
 export function parseRepositoryUrl(value: string): RepositoryIdentity {
-    const scp = /^git@([^/:]+):(.+)$/.exec(value);
-    const url = new URL(scp ? `ssh://git@${scp[1]}/${scp[2]}` : value);
+    const scp = /^[^@\s/:]+@([^/\s:]+):(.+)$/.exec(value);
+    const url = new URL(scp ? `ssh://${scp[1]}/${scp[2]}` : value);
     if (!['https:', 'ssh:'].includes(url.protocol) || url.search || url.hash) {
         throw new Error('Use an HTTPS or SSH GitHub repository URL.');
     }
@@ -45,6 +45,26 @@ export function parseRepositoryUrl(value: string): RepositoryIdentity {
 
 export function sameRepository(left: RepositoryIdentity, right: RepositoryIdentity): boolean {
     return left.url.toLowerCase() === right.url.toLowerCase();
+}
+
+export async function listMatchingRemotes(
+    repository: GitRepository,
+    expected: RepositoryIdentity,
+    signal?: AbortSignal
+): Promise<string[]> {
+    const names = (await runGit(repository.root, ['remote'], signal)).split('\n').filter(Boolean);
+    const matches: string[] = [];
+    for (const remote of names) {
+        const url = await runGit(repository.root, ['remote', 'get-url', remote], signal);
+        let identity: RepositoryIdentity;
+        try {
+            identity = parseRepositoryUrl(url);
+        } catch {
+            continue;
+        }
+        if (sameRepository(identity, expected)) { matches.push(remote); }
+    }
+    return matches;
 }
 
 export function parsePullRequestUrl(value: string): PullRequestReference {

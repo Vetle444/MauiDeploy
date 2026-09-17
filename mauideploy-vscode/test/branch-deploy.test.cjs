@@ -9,7 +9,7 @@ const { test } = require('node:test');
 const { getGitRepository, resolveCommit, withDeploymentWorktree } = require('../out/worktrees');
 const {
     parseRepositoryUrl, parsePullRequestUrl, parseDeployLink, createPullRequestLink, sameRepository,
-    listBranches, resolveBranchCommit, fetchPullRequestCommit
+    listBranches, listMatchingRemotes, resolveBranchCommit, fetchPullRequestCommit
 } = require('../out/branchSources');
 const { validateProfile, resolveDeploymentProject } = require('../out/branchProfiles');
 
@@ -141,6 +141,23 @@ test('PR links identify GitHub and Enterprise repositories without accepting com
     assert.throws(() => parsePullRequestUrl('https://github.com/team/repo/pull/12/../../issues'));
 });
 
+test('GHE remotes with a custom SSH username match HTTPS PR links without changing Git configuration', async context => {
+    const fixture = repositoryFixture(context);
+    const remoteUrl = 'employee@dips.ghe.com:Team/Mobile.git';
+    git(fixture.root, 'remote', 'add', 'origin', remoteUrl);
+    git(fixture.root, 'remote', 'add', 'public', 'git@github.com:Team/Mobile.git');
+    const reference = parsePullRequestUrl('https://dips.ghe.com/Team/Mobile/pull/12');
+    for (const value of [remoteUrl, 'git@dips.ghe.com:Team/Mobile.git', 'ssh://employee@dips.ghe.com/Team/Mobile.git']) {
+        assert.deepEqual(parseRepositoryUrl(value), reference.repository);
+    }
+    const repository = await getGitRepository(fixture.root);
+    assert.deepEqual(await listMatchingRemotes(repository, reference.repository), ['origin']);
+    assert.equal(git(fixture.root, 'remote', 'get-url', 'origin'), remoteUrl);
+    const bridge = new URL(createPullRequestLink(`${reference.repository.url}/pull/12`));
+    const deepLink = `vscode://FinstadProductions.maui-deploy/deploy-pr?${bridge.hash.slice(1)}`;
+    assert.deepEqual(parseDeployLink(deepLink, 'vscode'), reference);
+});
+
 test('shareable PR links keep repository details in the browser fragment and allow self-hosted bridges', () => {
     const link = new URL(createPullRequestLink('https://dips.ghe.com/team/app/pull/12', 'https://deploy.example.com/open/', true));
     assert.equal(link.origin, 'https://deploy.example.com');
@@ -164,12 +181,14 @@ test('saved setup cannot redirect a deployment project outside its worktree', as
     const profile = {
         version: 1, repositoryRoot: fixture.root, commonDirectory: path.join(fixture.root, '.git'),
         remote: 'origin', repositoryUrl: 'https://github.com/example/app', projectPath: 'App.csproj',
-        configuration: 'Debug', device: { id: 'device', name: 'Phone', platform: 'iOS', type: 'physical' },
-        allowAutomaticPullRequests: false
+        configuration: 'Debug', device: { id: 'device', name: 'Phone', platform: 'iOS', type: 'physical' }
     };
     assert.deepEqual(validateProfile(profile), profile);
+    assert.deepEqual(validateProfile({ ...profile, configuration: 'Release', allowAutomaticPullRequests: false }), profile);
+    assert.doesNotThrow(() => validateProfile({ ...profile, device: undefined }));
+    assert.throws(() => validateProfile({ ...profile, device: null }), /Invalid saved/);
     assert.throws(() => validateProfile({ ...profile, projectPath: '../App.csproj' }), /relative/);
-    assert.throws(() => validateProfile({ ...profile, allowAutomaticPullRequests: undefined }), /Invalid/);
+    assert.throws(() => validateProfile({ ...profile, configuration: 'Invalid' }), /Invalid/);
 });
 
 function deploymentHarness() {
@@ -181,7 +200,7 @@ function deploymentHarness() {
         version: 1, repositoryRoot: root, commonDirectory: repository.commonDirectory,
         remote: 'origin', repositoryUrl: 'https://github.com/example/app', projectPath: 'src/App.csproj',
         configuration: 'Release', device: { id: 'configured', name: 'Configured Phone', platform: 'iOS', type: 'physical' },
-        allowAutomaticPullRequests: true
+        allowAutomaticPullRequests: false
     };
     const source = parseRepositoryUrl(profile.repositoryUrl);
     const reference = { repository: source, number: 42 };
@@ -189,19 +208,66 @@ function deploymentHarness() {
         profile, reference, repository, trusted: true, confirms: [], builds: [], fetches: [],
         events: [], saves: [], pickerCount: 0, head: { repository: source, commit: 'a'.repeat(40) },
         remoteUrl: profile.repositoryUrl, cancelPicker: false, remoteOffline: false,
-        token: { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) }
+        hasProfile: true, setupResult: 'success', setupCalls: [], folderPicks: 0,
+        devicePicks: [], profileWrites: [], cancelDevice: false, abortDevice: false,
+        projects: ['src/App.csproj', 'src/Other.csproj'], remotes: ['origin'], commands: new Map(), failures: [],
+        platforms: [{ name: 'iOS', framework: 'net10.0-ios' }],
+        workspaceFolders: [{ uri: { fsPath: root } }],
+        token: { isCancellationRequested: false, onCancellationRequested: handler => {
+            fixture.cancel = () => { fixture.token.isCancellationRequested = true; handler(); };
+            return { dispose() {} };
+        } }
     };
+    let setupModule;
     const device = { ...profile.device, state: 'connected', display: profile.device.name };
+    fixture.devices = [device];
     const sandbox = {
         exports: {}, process, AbortController,
         require: name => {
             if (name === 'vscode') {
                 return {
-                    workspace: { get isTrusted() { return fixture.trusted; }, workspaceFolders: [{ uri: { fsPath: root } }] },
+                    workspace: { get isTrusted() { return fixture.trusted; }, get workspaceFolders() { return fixture.workspaceFolders; } },
                     CancellationError: class extends Error {},
+                    CancellationTokenSource: class {
+                        token = { isCancellationRequested: false };
+                        cancel() { this.token.isCancellationRequested = true; }
+                        dispose() {}
+                    },
+                    ThemeIcon: class {}, QuickPickItemKind: { Separator: -1 },
+                    commands: {
+                        registerCommand: (name, handler) => { fixture.commands.set(name, handler); return { dispose() {} }; }
+                    },
                     window: {
                         showWarningMessage: async message => { fixture.confirms.push(message); return fixture.confirmAnswer; },
                         showInformationMessage: async () => {},
+                        showErrorMessage: async message => fixture.failures.push(message),
+                        showQuickPick: async (items, options, token) => {
+                            if (items.some(item => item.device)) {
+                                assert.equal(token, fixture.token);
+                                fixture.devicePicks.push(items.filter(item => item.device));
+                                if (fixture.cancelDevice) { return undefined; }
+                                if (fixture.abortDevice) { fixture.cancel(); }
+                                if (fixture.selectedDeviceId) { return items.find(item => item.device?.id === fixture.selectedDeviceId); }
+                                return items.find(item => item.device);
+                            }
+                            fixture.setupCalls.push(items);
+                            assert.equal(fixture.fetches.length, 0);
+                            assert.equal(fixture.builds.length, 0);
+                            assert.equal(token.isCancellationRequested, false);
+                            if (fixture.setupResult === 'cancel' || fixture.setupCancelAt === fixture.setupCalls.length) { return undefined; }
+                            if (fixture.setupResult === 'abort') {
+                                fixture.cancel();
+                                assert.equal(token.isCancellationRequested, true);
+                                return undefined;
+                            }
+                            if (fixture.setupResult === 'failed') { throw new Error('Setup failed'); }
+                            return items.find(item => item.choice?.value === (fixture.selectedProject ?? profile.projectPath)) ?? items[0];
+                        },
+                        showOpenDialog: async () => {
+                            fixture.folderPicks++;
+                            return fixture.chosenFolder ? [{ fsPath: fixture.chosenFolder }] : undefined;
+                        },
+                        createTerminal: () => assert.fail('Setup must use native VS Code menus'),
                         createQuickPick: () => {
                             fixture.pickerCount++;
                             const handlers = {};
@@ -223,14 +289,35 @@ function deploymentHarness() {
             }
             if (name === './branchProfiles') {
                 return {
-                    readBranchProfiles: async () => [profile], readBranchProfile: async () => profile,
+                    readBranchProfiles: async () => fixture.hasProfile ? [validateProfile(profile)] : [],
+                    readBranchProfile: async () => fixture.hasProfile ? validateProfile(profile) : undefined,
+                    saveBranchProfile: async value => {
+                        if (fixture.setupResult === 'not-saved') { throw new Error('Could not save profile'); }
+                        if (!fixture.hasProfile) { fixture.events.push(['setup-complete']); }
+                        fixture.hasProfile = true;
+                        fixture.profileWrites.push(value);
+                        Object.assign(profile, value);
+                    },
                     resolveDeploymentProject: async (directory, relative) => path.join(directory, relative)
                 };
+            }
+            if (name === './branchSetup') {
+                if (!setupModule) {
+                    const setupFilename = path.resolve(__dirname, '../out/branchSetup.js');
+                    const setupSandbox = { exports: {}, module: {}, process, require: sandbox.require };
+                    vm.runInNewContext(fs.readFileSync(setupFilename, 'utf8'), setupSandbox, { filename: setupFilename });
+                    setupModule = setupSandbox.exports;
+                }
+                return setupModule;
             }
             if (name === './worktrees') {
                 return {
                     getGitRepository: async () => repository,
-                    runGit: async (directory, args) => args[0] === 'remote' ? fixture.remoteUrl : 'feature/local',
+                    runGit: async (directory, args) => {
+                        if (args[0] === 'remote') { return args.length === 1 ? fixture.remotes.join('\n') : fixture.remoteUrl; }
+                        if (args[0] === 'ls-files') { return fixture.projects.join('\0'); }
+                        return 'feature/local';
+                    },
                     withDeploymentWorktree: async (repo, commit, deploy) => {
                         fixture.events.push(['worktree', repo.worktreePath, commit]);
                         return deploy(repo.worktreePath);
@@ -244,6 +331,9 @@ function deploymentHarness() {
                         if (fixture.remoteOffline) { throw new Error('Offline'); }
                         return [{ name: 'feature/selected', remote: 'origin' }];
                     },
+                    listMatchingRemotes: async (repo, expected) => {
+                        return sameRepository(parseRepositoryUrl(fixture.remoteUrl), expected) ? ['origin'] : [];
+                    },
                     getPullRequestHead: async () => { fixture.events.push(['head']); return fixture.head; },
                     fetchPullRequestCommit: async (...args) => { fixture.fetches.push(args); return fixture.head.commit; },
                     resolveBranchCommit: async (repo, branch) => { fixture.events.push(['branch', branch]); return fixture.head.commit; }
@@ -251,8 +341,10 @@ function deploymentHarness() {
             }
             if (name === './devices') {
                 return {
-                    detectPlatforms: () => [{ name: 'iOS', framework: 'net10.0-ios' }],
-                    detectAllDevices: async () => [device], bootSimulator: async () => assert.fail('A physical device must not be booted')
+                    isMauiProject: () => true,
+                    detectPlatforms: () => fixture.platforms,
+                    detectAllDevices: async platforms => fixture.devices.filter(device => platforms.some(platform => platform.name === device.platform)),
+                    bootSimulator: async () => assert.fail('A physical device must not be booted')
                 };
             }
             if (name === './deployer') {
@@ -262,41 +354,208 @@ function deploymentHarness() {
         }
     };
     vm.runInNewContext(fs.readFileSync(filename, 'utf8'), sandbox, { filename });
-    const context = { globalState: { get: () => undefined, update: async (...args) => fixture.saves.push(args) } };
+    const context = {
+        asAbsolutePath: relative => path.join('/extension', relative),
+        subscriptions: [], environmentVariableCollection: { prepend() {}, replace() {} },
+        globalState: { get: () => undefined, update: async (...args) => fixture.saves.push(args) }
+    };
     fixture.run = request => sandbox.exports.deployBranch(context, fixture.token, () => {}, undefined, request);
+    fixture.registerSetup = () => sandbox.exports.registerBranchSetup(context, () => path.join(root, profile.projectPath));
     return fixture;
 }
 
-test('a trusted same-repository PR deploys automatically with the saved target and isolated project', async () => {
+test('a same-repository PR uses Debug without legacy permission or configuration prompts', async () => {
     const fixture = deploymentHarness();
     assert.equal((await fixture.run(fixture.reference)).success, true);
     assert.equal(fixture.confirms.length, 0);
+    assert.equal(fixture.setupCalls.length, 0);
     assert.equal(fixture.pickerCount, 0);
+    assert.equal(fixture.devicePicks.length, 1);
     assert.equal(fixture.fetches.length, 1);
     const [project, platform, device, configuration, token, progress, terminal] = fixture.builds[0];
     assert.equal(project, path.join(fixture.repository.worktreePath, 'src/App.csproj'));
     assert.equal(platform.framework, 'net10.0-ios');
     assert.equal(device.id, 'configured');
-    assert.equal(configuration, 'Release');
+    assert.equal(configuration, 'Debug');
     assert.equal(token, fixture.token);
     assert.equal(typeof progress, 'function');
     assert.equal(terminal, 'MAUI Deploy - Branch');
     assert.equal(fixture.saves.length, 0);
 });
 
-test('unapproved PRs and fork heads cannot fetch or build without explicit consent', async () => {
-    for (const scenario of ['unapproved', 'fork']) {
+test('every branch and PR deployment requires device selection, even with only one connected device', async () => {
+    for (const fromPullRequest of [true, false]) {
         const fixture = deploymentHarness();
-        if (scenario === 'unapproved') { fixture.profile.allowAutomaticPullRequests = false; }
-        else { fixture.head.repository = parseRepositoryUrl('https://github.com/contributor/app'); }
-        assert.equal(await fixture.run(fixture.reference), undefined);
-        assert.equal(fixture.confirms.length, 1);
+        for (let deployment = 0; deployment < 2; deployment++) {
+            await fixture.run(fromPullRequest ? fixture.reference : undefined);
+        }
+        assert.equal(fixture.devicePicks.length, 2);
+        assert.equal(fixture.builds.length, 2);
+        assert.ok(fixture.builds.every(args => args[3] === 'Debug'));
+        assert.equal(fixture.confirms.length, 0);
+        assert.ok(fixture.devicePicks.every(items => items.length === 1));
+    }
+});
+
+test('device choice can switch platforms, remembers the last choice and excludes unavailable or unsupported targets', async () => {
+    const fixture = deploymentHarness();
+    fixture.platforms.push({ name: 'Android', framework: 'net10.0-android' });
+    fixture.devices.push(
+        { id: 'android', name: 'Pixel', display: 'Pixel', platform: 'Android', type: 'physical', state: 'connected' },
+        { id: 'offline', name: 'Offline', display: 'Offline', platform: 'iOS', type: 'physical', available: false },
+        { id: 'unsupported', platform: 'Windows', type: 'physical' }
+    );
+    fixture.selectedDeviceId = 'android';
+    await fixture.run(fixture.reference);
+    assert.equal(fixture.devicePicks[0][0].device.id, 'configured');
+    assert.deepEqual(Array.from(fixture.devicePicks[0], item => item.device.id), ['configured', 'android']);
+    assert.equal(fixture.builds[0][1].framework, 'net10.0-android');
+    assert.equal(fixture.builds[0][2].id, 'android');
+    assert.equal(fixture.profile.device.id, 'android');
+    fixture.selectedDeviceId = undefined;
+    await fixture.run(fixture.reference);
+    assert.equal(fixture.devicePicks[1][0].device.id, 'android');
+    assert.equal(fixture.devicePicks.length, 2);
+});
+
+test('cancelled device selection never builds or overwrites the last device', async () => {
+    for (const abortDevice of [false, true]) {
+        const fixture = deploymentHarness();
+        fixture.cancelDevice = !abortDevice;
+        fixture.abortDevice = abortDevice;
+        await assert.rejects(fixture.run(fixture.reference));
+        assert.equal(fixture.builds.length, 0);
+        assert.equal(fixture.profileWrites.length, 0);
+        assert.equal(fixture.profile.device.id, 'configured');
+    }
+});
+
+test('first deployment has no device default and a disconnected last device does not block choosing another', async () => {
+    const fixture = deploymentHarness();
+    fixture.profile.device = undefined;
+    await fixture.run(fixture.reference);
+    assert.equal(fixture.devicePicks.length, 1);
+    fixture.devices = [{ id: 'replacement', name: 'Other Phone', display: 'Other Phone', platform: 'iOS', type: 'physical' }];
+    await fixture.run(fixture.reference);
+    assert.equal(fixture.builds[1][2].id, 'replacement');
+    fixture.devices = [];
+    await assert.rejects(fixture.run(fixture.reference), /No available devices/);
+    assert.equal(fixture.builds.length, 2);
+});
+
+test('first PR click uses native setup menus and selects the device once before resuming the same PR', async () => {
+    const fixture = deploymentHarness();
+    fixture.hasProfile = false;
+    assert.equal((await fixture.run(fixture.reference)).success, true);
+    assert.equal(fixture.setupCalls.length, 1);
+    assert.equal(fixture.profileWrites[0].device, undefined);
+    assert.equal(fixture.profileWrites[0].projectPath, 'src/App.csproj');
+    assert.equal(fixture.profileWrites[0].configuration, 'Debug');
+    assert.equal(Object.hasOwn(fixture.profileWrites[0], 'allowAutomaticPullRequests'), false);
+    assert.equal(fixture.devicePicks.length, 1);
+    assert.equal(fixture.fetches[0][2], fixture.reference);
+    assert.equal(fixture.pickerCount, 0);
+    assert.equal(fixture.folderPicks, 0);
+    assert.equal(fixture.confirms.length, 0);
+    assert.ok(fixture.events.findIndex(event => event[0] === 'setup-complete') < fixture.events.findIndex(event => event[0] === 'head'));
+    await fixture.run(fixture.reference);
+    assert.equal(fixture.setupCalls.length, 1);
+    assert.equal(fixture.devicePicks.length, 2);
+    assert.equal(fixture.builds.length, 2);
+});
+
+test('native setup cancellation, failure or save failure never fetches or deploys', async () => {
+    for (const setupResult of ['cancel', 'abort', 'failed', 'not-saved']) {
+        const fixture = deploymentHarness();
+        fixture.hasProfile = false;
+        fixture.setupResult = setupResult;
+        await assert.rejects(fixture.run(fixture.reference));
+        assert.equal(fixture.hasProfile, false);
         assert.equal(fixture.fetches.length, 0);
         assert.equal(fixture.builds.length, 0);
-        fixture.confirmAnswer = 'Build & Deploy';
-        assert.equal((await fixture.run(fixture.reference)).success, true);
-        assert.equal(fixture.builds.length, 1);
     }
+});
+
+test('cancelling any setup menu preserves the previous configuration without partial saves', async () => {
+    for (const setupCancelAt of [1, 2]) {
+        const fixture = deploymentHarness();
+        fixture.remotes = ['origin', 'upstream'];
+        fixture.registerSetup();
+        fixture.selectedProject = 'src/Other.csproj';
+        fixture.setupCancelAt = setupCancelAt;
+        await fixture.commands.get('mauideploy.setupBranchDeploy')();
+        assert.equal(fixture.profileWrites.length, 0);
+        assert.equal(fixture.profile.projectPath, 'src/App.csproj');
+        assert.equal(fixture.devicePicks.length, 0);
+        assert.equal(fixture.failures.length, 0);
+    }
+});
+
+test('command palette setup uses the same menus, preserves the last device and never starts a deployment', async () => {
+    const fixture = deploymentHarness();
+    fixture.registerSetup();
+    fixture.selectedProject = 'src/Other.csproj';
+    await fixture.commands.get('mauideploy.setupBranchDeploy')();
+    assert.equal(fixture.profile.projectPath, 'src/Other.csproj');
+    assert.equal(fixture.profile.configuration, 'Debug');
+    assert.equal(fixture.profile.device.id, 'configured');
+    assert.equal(fixture.devicePicks.length, 0);
+    assert.equal(fixture.profileWrites.length, 1);
+    assert.equal(fixture.builds.length, 0);
+    assert.equal(fixture.failures.length, 0);
+});
+
+test('single project and remote choices are automatic, but the device picker is never skipped', async () => {
+    const fixture = deploymentHarness();
+    fixture.projects = ['src/App.csproj'];
+    fixture.hasProfile = false;
+    await fixture.run(fixture.reference);
+    assert.equal(fixture.setupCalls.length, 0);
+    assert.equal(fixture.devicePicks.length, 1);
+});
+
+test('a PR without an open matching repository can select a local clone, but not another repository', async () => {
+    const fixture = deploymentHarness();
+    fixture.hasProfile = false;
+    fixture.workspaceFolders = [];
+    fixture.chosenFolder = fixture.repository.root;
+    assert.equal((await fixture.run(fixture.reference)).success, true);
+    assert.equal(fixture.folderPicks, 1);
+    assert.equal(fixture.setupCalls.length, 1);
+    for (const chosenFolder of [undefined, fixture.repository.root]) {
+        const invalid = deploymentHarness();
+        invalid.hasProfile = false;
+        invalid.remoteUrl = 'https://github.com/other/repository';
+        invalid.chosenFolder = chosenFolder;
+        await assert.rejects(invalid.run(invalid.reference));
+        assert.equal(invalid.setupCalls.length, 0);
+        assert.equal(invalid.fetches.length, 0);
+        assert.equal(invalid.builds.length, 0);
+    }
+});
+
+test('the branch button also starts setup on first use without changing ordinary deployment state', async () => {
+    const fixture = deploymentHarness();
+    fixture.hasProfile = false;
+    assert.equal((await fixture.run()).success, true);
+    assert.equal(fixture.setupCalls.length, 1);
+    assert.equal(fixture.pickerCount, 1);
+    assert.ok(fixture.saves.every(entry => entry[0].startsWith('mauideploy.branch.')));
+});
+
+test('fork PRs still require explicit consent and device selection before building', async () => {
+    const fixture = deploymentHarness();
+    fixture.head.repository = parseRepositoryUrl('https://github.com/contributor/app');
+    assert.equal(await fixture.run(fixture.reference), undefined);
+    assert.equal(fixture.confirms.length, 1);
+    assert.equal(fixture.fetches.length, 0);
+    assert.equal(fixture.devicePicks.length, 0);
+    assert.equal(fixture.builds.length, 0);
+    fixture.confirmAnswer = 'Build & Deploy';
+    assert.equal((await fixture.run(fixture.reference)).success, true);
+    assert.equal(fixture.devicePicks.length, 1);
+    assert.equal(fixture.builds.length, 1);
+    assert.equal(fixture.builds[0][3], 'Debug');
 });
 
 test('untrusted workspaces, changed remotes, wrong repositories and cancelled operations never build', async () => {
@@ -331,7 +590,7 @@ test('the branch button always requires a selection, remembers it separately and
     assert.equal(cancelled.saves.length, 0);
 });
 
-test('terminal setup saves the selected defaults outside the repository and reuses them on the next setup', async context => {
+test('terminal setup skips configuration and permissions and migrates old profiles without losing project or device', async context => {
     const fixture = repositoryFixture(context);
     git(fixture.root, 'remote', 'add', 'origin', 'https://github.com/example/app.git');
     fs.writeFileSync(path.join(fixture.root, 'App.csproj'), '<Project><PropertyGroup><UseMaui>true</UseMaui><TargetFramework>net10.0-ios</TargetFramework></PropertyGroup></Project>');
@@ -345,22 +604,17 @@ test('terminal setup saves the selected defaults outside the repository and reus
     };
     vm.runInNewContext(fs.readFileSync(profileFile, 'utf8'), profileSandbox, { filename: profileFile });
     const profileApi = profileSandbox.exports;
-    const answers = ['2', 'yes'];
     const setupFile = path.resolve(__dirname, '../out/branchSetup.js');
     const setupRequire = createRequire(setupFile);
-    const device = { id: 'chosen', name: 'Chosen Phone', platform: 'iOS', type: 'physical', state: 'connected', display: 'Chosen Phone' };
     const setupSandbox = {
         exports: {}, module: {}, process,
         require: name => {
             if (name === 'process') { return { stdin: {}, stdout: { write() {} } }; }
             if (name === 'readline/promises') {
-                return { createInterface: () => ({ question: async () => {
-                    assert.ok(answers.length > 0, 'Unexpected setup question');
-                    return answers.shift();
-                }, close() {} }) };
+                return { createInterface: () => ({ question: async () => assert.fail('Unexpected setup question'), close() {} }) };
             }
             if (name === './branchProfiles') { return profileApi; }
-            if (name === './devices') { return { ...setupRequire(name), detectAllDevices: async () => [device] }; }
+            if (name === './devices') { return { ...setupRequire(name), detectAllDevices: async () => assert.fail('Setup must not choose a device') }; }
             return setupRequire(name);
         }
     };
@@ -369,17 +623,34 @@ test('terminal setup saves the selected defaults outside the repository and reus
     const repository = await getGitRepository(fixture.root);
     let profile = await profileApi.readBranchProfile(repository);
     assert.equal(profile.projectPath, 'App.csproj');
-    assert.equal(profile.configuration, 'Release');
-    assert.equal(profile.device.id, 'chosen');
-    assert.equal(profile.allowAutomaticPullRequests, true);
+    assert.equal(profile.configuration, 'Debug');
+    assert.equal(profile.device, undefined);
+    assert.equal(Object.hasOwn(profile, 'allowAutomaticPullRequests'), false);
     assert.equal((await profileApi.readBranchProfiles()).length, 1);
-    answers.push('', '');
+    profile.device = { id: 'last-used', name: 'Phone', platform: 'iOS', type: 'physical' };
+    const profileDirectory = path.join(home, '.mauideploy', 'branch-deploy');
+    const storedProfileFile = path.join(profileDirectory, fs.readdirSync(profileDirectory)[0]);
+    fs.writeFileSync(storedProfileFile, JSON.stringify({ ...profile, configuration: 'Release', allowAutomaticPullRequests: false }));
+    assert.equal((await profileApi.readBranchProfile(repository)).configuration, 'Debug');
+    assert.equal((await profileApi.readBranchProfiles())[0].configuration, 'Debug');
     await setupSandbox.exports.setupBranchDeploy(fixture.root);
     profile = await profileApi.readBranchProfile(repository);
-    assert.equal(profile.configuration, 'Release');
-    assert.equal(profile.allowAutomaticPullRequests, false);
+    assert.equal(profile.configuration, 'Debug');
+    assert.equal(profile.device.id, 'last-used');
+    const storedProfile = JSON.parse(fs.readFileSync(storedProfileFile, 'utf8'));
+    assert.equal(storedProfile.configuration, 'Debug');
+    assert.equal(Object.hasOwn(storedProfile, 'allowAutomaticPullRequests'), false);
     assert.equal((await profileApi.readBranchProfiles()).length, 1);
     assert.equal(git(fixture.root, 'status', '--porcelain=v1'), before);
     assert.equal(fs.existsSync(repository.worktreePath), false);
-    assert.equal(answers.length, 0);
+
+    git(fixture.root, 'remote', 'set-url', 'origin', 'https://github.com/contributor/app.git');
+    git(fixture.root, 'remote', 'add', 'upstream', 'https://github.com/example/app.git');
+    await setupSandbox.exports.setupBranchDeploy(fixture.root, 'https://github.com/example/app');
+    profile = await profileApi.readBranchProfile(repository);
+    assert.equal(profile.remote, 'upstream');
+    assert.equal(profile.repositoryUrl, 'https://github.com/example/app');
+    assert.equal(profile.configuration, 'Debug');
+    await assert.rejects(setupSandbox.exports.setupBranchDeploy(fixture.root, 'https://github.com/other/app'), /No Git remote matches/);
+    assert.equal((await profileApi.readBranchProfile(repository)).remote, 'upstream');
 });

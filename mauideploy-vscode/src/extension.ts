@@ -96,7 +96,7 @@ export function activate(context: vscode.ExtensionContext) {
     loadState();
     createStatusBar(context);
     registerCommands(context);
-    registerBranchSetup(context);
+    registerBranchSetup(context, () => state.projectPath);
     context.subscriptions.push(vscode.window.registerUriHandler({
         async handleUri(uri) {
             try {
@@ -199,7 +199,7 @@ function updateStatusBar() {
         sbBranch.command = 'mauideploy.deployBranch';
         sbBranch.color = '#4ec9b0';
         sbBranch.backgroundColor = undefined;
-        sbBranch.tooltip = 'Deploy Branch or PR using a separate worktree. Setup: mauideploy setup in a new VS Code terminal.';
+        sbBranch.tooltip = 'Deploy Branch or PR using a separate worktree. Choose a device each time. Settings: MAUI Deploy: Set Up Branch Deployment.';
     }
     sbBranch.show();
 

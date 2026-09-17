@@ -2,15 +2,18 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
-## Unreleased
+## 1.6.0 - 2026-09-17
 
 ### Added
 - Add Deploy Branch with searchable local/remote branches and GitHub or GitHub Enterprise PR URLs, using a reusable detached worktree without changing the active checkout.
-- Add `mauideploy setup` in new VS Code terminals to remember a separate project, configuration, device, and same-repository PR authorization.
-- Add PR URI handling and `mauideploy pr-link`, with an automatically opening HTTPS bridge and a manual GitHub Pages publishing workflow. Hosting must be enabled separately.
+- Add shared project setup using native VS Code menus or the optional `mauideploy setup` terminal command. Always use Debug for branch/PR deployment, including older Release profiles, without configuration or PR permissions prompts. Fork PRs retain an explicit build confirmation.
+- Open native setup menus automatically on first branch/PR use, select a matching local clone when needed, and resume the original PR after successful setup. Cancelled or failed setup never starts fetch or build.
+- Require device selection before every branch/PR deployment, even with a single available target. Suggest the last used device without automatically selecting it, support choosing another platform and stop before building when selection is cancelled.
+- Add PR URI handling and `mauideploy pr-link`, with a hosted HTTPS bridge and a manual GitHub Pages publishing workflow.
 - Protect dirty worktrees, concurrent deployments, repository identity, fork PR execution, and fetched PR commit consistency; retain cancellation and ordinary Run/Debug selections.
 
 ### Fixed
+- Accept GitHub Enterprise SSH remotes with custom usernames, preventing `Invalid URL` during branch/PR setup without changing Git authentication.
 - Start Run build terminals in the selected project's directory, including branch worktrees, so SDK selection uses the correct `global.json`.
 
 ## 1.5.0 - 2026-09-14

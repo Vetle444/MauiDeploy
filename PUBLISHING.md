@@ -14,15 +14,20 @@ Clone it with submodules so the Mono debugger libraries are restored:
 git clone --recurse-submodules https://github.com/Vetle444/MauiDeploy.git
 ```
 
+The debugger submodule uses the MauiDeploy-maintained fork at
+https://github.com/Vetle444/debugger-libs. Its pinned commit includes the debugger
+changes shipped with the extension.
+
 For an existing clone, restore submodules with:
 
 ```bash
+git submodule sync --recursive
 git submodule update --init --recursive
 ```
 
 ## Visual Studio Marketplace
 
-The VS Code extension lives in `mauideploy-vscode/` and is configured with publisher id `VetleFinstad`.
+The VS Code extension lives in `mauideploy-vscode/` and is configured with publisher id `FinstadProductions`.
 
 To publish publicly in the VS Code Marketplace:
 
@@ -33,7 +38,7 @@ To publish publicly in the VS Code Marketplace:
 
 ```bash
 cd mauideploy-vscode
-npx @vscode/vsce login VetleFinstad
+npx @vscode/vsce login FinstadProductions
 ```
 
 5. Build and publish the extension:
@@ -58,7 +63,8 @@ Use this flow whenever you want to ship a new VSIX or publish a new Marketplace 
 
 ```bash
 git checkout main
-git pull --recurse-submodules
+git pull --ff-only --no-recurse-submodules
+git submodule sync --recursive
 git submodule update --init --recursive
 ```
 

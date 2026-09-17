@@ -1,10 +1,76 @@
 import * as path from 'path';
 import { createInterface, Interface } from 'readline/promises';
+import { parseArgs } from 'util';
 import { stdin, stdout } from 'process';
-import { detectAllDevices, detectPlatforms, isMauiProject } from './devices';
+import { isMauiProject } from './devices';
 import { BranchDeployProfile, readBranchProfile, saveBranchProfile } from './branchProfiles';
-import { createPullRequestLink, parseRepositoryUrl } from './branchSources';
-import { getGitRepository, runGit } from './worktrees';
+import { createPullRequestLink, listMatchingRemotes, parseRepositoryUrl } from './branchSources';
+import { getGitRepository, GitRepository, runGit } from './worktrees';
+
+export interface BranchSetupChoice<Value> {
+    value: Value;
+    label: string;
+    description?: string;
+}
+
+export type BranchSetupPrompt = <Value>(
+    title: string,
+    choices: BranchSetupChoice<Value>[],
+    preferredIndex: number
+) => Promise<Value>;
+
+async function selectSetupChoice<Value>(
+    prompt: BranchSetupPrompt,
+    title: string,
+    choices: BranchSetupChoice<Value>[],
+    preferredIndex: number,
+    signal?: AbortSignal
+): Promise<Value> {
+    signal?.throwIfAborted();
+    if (choices.length === 0) { throw new Error(`No choices available for ${title}.`); }
+    if (choices.length === 1) { return choices[0].value; }
+    const value = await prompt(title, choices, Math.max(0, preferredIndex));
+    signal?.throwIfAborted();
+    return value;
+}
+
+export async function configureBranchDeploy(
+    repository: GitRepository,
+    prompt: BranchSetupPrompt,
+    expectedRepositoryUrl?: string,
+    signal?: AbortSignal
+): Promise<BranchDeployProfile> {
+    signal?.throwIfAborted();
+    const previous = await readBranchProfile(repository);
+    const expected = expectedRepositoryUrl ? parseRepositoryUrl(expectedRepositoryUrl) : undefined;
+    const remotes = expected
+        ? await listMatchingRemotes(repository, expected, signal)
+        : (await runGit(repository.root, ['remote'], signal)).split('\n').filter(Boolean);
+    if (expected && remotes.length === 0) { throw new Error(`No Git remote matches ${expected.url}.`); }
+    const remote = await selectSetupChoice(prompt, 'Git Remote',
+        remotes.map(value => ({ value, label: value })), remotes.indexOf(previous?.remote ?? 'origin'), signal);
+    const repositoryUrl = parseRepositoryUrl(await runGit(repository.root, ['remote', 'get-url', remote], signal)).url;
+
+    const tracked = await runGit(repository.root, ['ls-files', '--cached', '--recurse-submodules', '-z', '--', '*.csproj'], signal);
+    const projects = tracked.split('\0').filter(filename => filename.endsWith('.csproj'))
+        .filter(filename => isMauiProject(path.join(repository.root, filename))).sort();
+    if (projects.length === 0) { throw new Error('No tracked MAUI projects found in this repository.'); }
+    const projectPath = await selectSetupChoice(prompt, 'Project', projects.map(value => ({
+        value, label: path.basename(value, '.csproj'), description: value
+    })), projects.indexOf(previous?.projectPath ?? ''), signal);
+
+    signal?.throwIfAborted();
+    const profile: BranchDeployProfile = {
+        version: 1,
+        repositoryRoot: repository.root,
+        commonDirectory: repository.commonDirectory,
+        remote, repositoryUrl, projectPath,
+        configuration: 'Debug',
+        device: previous?.device
+    };
+    await saveBranchProfile(profile);
+    return profile;
+}
 
 async function choose<Value>(
     input: Interface,
@@ -29,56 +95,37 @@ async function choose<Value>(
     }
 }
 
-export async function setupBranchDeploy(directory: string): Promise<void> {
+export async function setupBranchDeploy(directory: string, expectedRepositoryUrl?: string): Promise<void> {
     const repository = await getGitRepository(directory);
-    const previous = await readBranchProfile(repository);
     const input = createInterface({ input: stdin, output: stdout });
     try {
         stdout.write(`MauiDeploy branch deployment setup\nRepository: ${repository.root}\n`);
-        const remotes = (await runGit(repository.root, ['remote'])).split('\n').filter(Boolean);
-        const remote = await choose(input, 'Git remote', remotes, name => name,
-            remotes.indexOf(previous?.remote ?? 'origin'));
-        const repositoryUrl = parseRepositoryUrl(await runGit(repository.root, ['remote', 'get-url', remote])).url;
-        const tracked = await runGit(repository.root, ['ls-files', '--cached', '--recurse-submodules', '-z', '--', '*.csproj']);
-        const projects = tracked.split('\0').filter(filename => filename.endsWith('.csproj'))
-            .filter(filename => isMauiProject(path.join(repository.root, filename))).sort();
-        if (projects.length === 0) { throw new Error('No tracked MAUI projects found. Run setup from your MAUI application repository.'); }
-        const projectPath = await choose(input, 'Project', projects, filename => filename,
-            projects.indexOf(previous?.projectPath ?? ''));
-        const configurations: BranchDeployProfile['configuration'][] = ['Debug', 'Release'];
-        const configuration = await choose(input, 'Configuration', configurations, name => name,
-            configurations.indexOf(previous?.configuration ?? 'Debug'));
-        stdout.write('\nDetecting devices...\n');
-        const devices = (await detectAllDevices(detectPlatforms(path.join(repository.root, projectPath))))
-            .filter(device => device.available !== false);
-        if (devices.length === 0) { throw new Error('No available devices. Connect a device or create an iOS simulator, then run setup again.'); }
-        const device = await choose(input, 'Device', devices,
-            value => `${value.platform} / ${value.display} (${value.state})`,
-            devices.findIndex(value => value.id === previous?.device.id));
-        stdout.write('\nPR links can automatically fetch, build and run code on this machine.\n');
-        stdout.write('Only PRs whose source repository matches the configured repository are eligible. Forks require separate confirmation.\n');
-        const answer = await input.question('Allow automatic deployment from PR links for this repository? [y/N]: ');
-        const allowAutomaticPullRequests = /^(y|yes)$/i.test(answer.trim());
-        await saveBranchProfile({
-            version: 1,
-            repositoryRoot: repository.root,
-            commonDirectory: repository.commonDirectory,
-            remote, repositoryUrl, projectPath, configuration,
-            device: { id: device.id, name: device.name, platform: device.platform, type: device.type },
-            allowAutomaticPullRequests
-        });
-        stdout.write(`\nSaved: ${projectPath} / ${configuration} / ${device.name}\n`);
+        const profile = await configureBranchDeploy(repository, async (title, choices, preferredIndex) => {
+            const choice = await choose(input, title, choices,
+                value => [value.label, value.description].filter(Boolean).join(' / '), preferredIndex);
+            return choice.value;
+        }, expectedRepositoryUrl);
+        stdout.write(`\nSaved: ${profile.projectPath} / ${profile.configuration}\n`);
         stdout.write(`Deployment worktree: ${repository.worktreePath}\n`);
+        stdout.write('Choose a device in VS Code before each branch or PR deployment.\n');
         stdout.write('Use Deploy Branch in the VS Code status bar. Your ordinary Run/Debug selections are unchanged.\n');
     } finally {
         input.close();
     }
 }
 
+async function runSetupCommand(args: string[]): Promise<void> {
+    const { positionals, values } = parseArgs({
+        args, allowPositionals: true, options: { repository: { type: 'string' } }
+    });
+    if (positionals.length > 1) { throw new Error('Specify only one local repository directory.'); }
+    await setupBranchDeploy(path.resolve(positionals[0] ?? process.cwd()), values.repository);
+}
+
 if (require.main === module) {
     const [command, value, ...extra] = process.argv.slice(2);
-    if (command === 'setup' && extra.length === 0) {
-        setupBranchDeploy(path.resolve(value ?? process.cwd())).catch(error => {
+    if (command === 'setup') {
+        runSetupCommand(process.argv.slice(3)).catch(error => {
             console.error(error instanceof Error ? error.message : String(error));
             process.exitCode = 1;
         });
@@ -98,7 +145,7 @@ if (require.main === module) {
             process.exitCode = 1;
         }
     } else {
-        stdout.write('Usage: mauideploy setup [repository-directory]\n');
+        stdout.write('Usage: mauideploy setup [repository-directory] [--repository <HTTPS-URL>]\n');
         stdout.write('       mauideploy pr-link <PR-URL> [--bridge <HTTPS-URL>] [--insiders]\n');
         if (command && !['--help', '-h'].includes(command)) { process.exitCode = 1; }
     }

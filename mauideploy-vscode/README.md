@@ -37,28 +37,54 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 
 ## Branch And PR Deployment
 
-After installing or updating the extension, reload VS Code and open a **new
-integrated terminal** in your MAUI application repository:
+After installing or updating the extension, reload VS Code. The first **Deploy
+Branch** click or PR link automatically opens VS Code's native selection menus if that repository
+has no saved profile. For a PR link, MauiDeploy uses a matching open repository;
+otherwise it asks you to select an existing local clone. Only remotes matching
+the PR repository are available during that setup. It does not clone a repository
+automatically.
+
+Setup selects a Git remote and tracked MAUI project. Single remote/project choices
+are automatic. All branch/PR builds use **Debug**; there is no configuration or PR
+permissions menu. Previously saved Release and permission choices no longer affect
+deployment. Cancelling any menu leaves the existing profile unchanged. After setup,
+the original PR continues without another link click.
+
+The project picker only lists projects inside the selected repository. A PR link
+selects its repository; the toolbar and setup command start from the ordinary selected
+project, or the open workspace folders when no project is selected. Projects in other
+local clones are not included. Use a PR link for the intended repository or select
+its project in the ordinary project picker before starting branch deployment.
+
+**Choose a device before every branch or PR deployment**, including when only one
+device is available. The picker lists compatible iOS and Android targets for the
+selected branch. The last used device appears first, but always requires selection.
+Cancelling the picker stops before build, install or launch and preserves the last
+device. The project and last used device are remembered separately from ordinary
+Run/Debug selections, including their Debug/Release setting, which are unchanged.
+
+To configure ahead of time or change the saved settings, use **MAUI Deploy: Set Up
+Branch Deployment** in the command palette. It opens the same native menus without
+starting a deployment. As an optional terminal alternative, open a **new integrated
+terminal** in your MAUI application repository and run:
 
 ```sh
 mauideploy setup
 ```
 
-The command selects a Git remote, tracked MAUI project, Debug/Release configuration,
-and device. Single project/device choices are automatic. These defaults are stored
-locally per repository under `~/.mauideploy/branch-deploy/`, separately from ordinary
-Run/Debug selections. No project files are changed. Run setup again to change them.
-The command palette's **MAUI Deploy: Set Up Branch Deployment** opens this terminal
-flow. The terminal command uses VS Code's bundled runtime; a global Node installation
-is not required. It is available in new VS Code terminals, not globally in other shells.
+Both setup interfaces use the same validation and store settings locally per
+repository under `~/.mauideploy/branch-deploy/`. Neither setup asks for a device;
+that choice belongs to each deployment. No project files are changed. The optional
+terminal command uses VS Code's bundled runtime; a global Node installation is not
+required. It is available in new VS Code terminals, not globally in other shells.
 
 Click **Deploy Branch** in the status bar, search for a branch, and press Enter.
 Remote and local branches are distinguished, and the last selection appears first.
 Local branches remain available when the remote is offline. You can also paste an
 HTTPS GitHub or GitHub Enterprise PR URL. Every ordinary button click requires a
-branch/PR selection; subsequent project, configuration, and device pickers are not
-part of deployment. Missing projects or unavailable devices stop with an error instead
-of silently selecting something else.
+branch/PR selection followed by a device selection. The project menu is only needed
+during setup. Missing projects or no available compatible devices
+stop with an error instead of silently selecting something else.
 
 MauiDeploy creates a sibling `<repository>-mauideploy` worktree with detached HEAD
 at the selected commit. It reuses that directory and ignored build output on later
@@ -80,13 +106,13 @@ Deploying the same application ID replaces the installed app. Custom absolute ou
 paths and references outside the repository are not isolated by Git. Ignored local
 configuration and signing files are not copied from the development checkout.
 
-### One-Click PR Links
+### PR Links
 
 GitHub CLI (`gh`) must be installed and authenticated for the repository's host;
-Git uses your existing remote credentials. PR links can deploy automatically only
-after setup explicitly authorizes this for the repository. The workspace must be
-trusted. Fork PRs and repositories without automatic authorization require a build
-confirmation because restore/build can execute code locally.
+Git uses your existing remote credentials. The workspace must be trusted, and a device
+must be selected for every deployment. Same-repository PRs need no additional build
+confirmation. Fork PRs still require explicit confirmation because restore/build can
+execute code locally. A worktree is not a security sandbox; only deploy code you trust.
 
 Generate Markdown for a PR description or comment:
 
@@ -96,10 +122,11 @@ mauideploy pr-link https://github.com/owner/repository/pull/123
 
 The link opens an HTTPS bridge that automatically invokes
 `vscode://FinstadProductions.maui-deploy/deploy-pr`. MauiDeploy finds the configured
-local repository and performs fetch, worktree preparation, build, install, and launch
-without further picks for an authorized same-repository PR. The browser or OS may
-still ask to open VS Code. A fallback link remains visible if automatic opening is
-blocked. If multiple clones are configured for the same remote, you choose the clone.
+local repository, fetches the PR and prepares its worktree. After you select a device,
+Debug build, install and launch proceed automatically for a same-repository PR.
+The browser or OS may still ask to open VS Code. A fallback link remains visible if
+automatic opening is blocked. If multiple clones are configured for the same remote,
+you choose the clone.
 
 The default HTTPS bridge is hosted at `https://vetle444.github.io/MauiDeploy/deploy/`.
 Application repositories do not need their own GitHub Pages setup. The bridge source
