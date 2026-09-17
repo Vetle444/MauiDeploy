@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ -z "$MAUIDEPLOY_NODE" ] || [ -z "$MAUIDEPLOY_CLI" ]; then
+    printf '%s\n' 'Open a new VS Code terminal with the MauiDeploy extension enabled.' >&2
+    exit 1
+fi
+ELECTRON_RUN_AS_NODE=1 exec "$MAUIDEPLOY_NODE" "$MAUIDEPLOY_CLI" "$@"

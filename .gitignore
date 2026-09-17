@@ -18,6 +18,7 @@ mauideploy-vscode/*.vsix
 *.log
 .env
 .env.*
+/selfIdentity.plist
 
 # Packages
 *.nupkg

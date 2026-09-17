@@ -28,7 +28,7 @@ interface BuildFailureContext {
 let lastBuildFailure: BuildFailureContext | undefined;
 const projectBuilds = new Map<string, Promise<void>>();
 
-function getBuildTerminal(fresh = true, name = defaultBuildTerminalName): vscode.Terminal {
+function getBuildTerminal(fresh = true, name = defaultBuildTerminalName, cwd?: string): vscode.Terminal {
     const existing = buildTerminals.get(name);
     if (fresh && existing && !existing.exitStatus) {
         existing.dispose();
@@ -38,6 +38,7 @@ function getBuildTerminal(fresh = true, name = defaultBuildTerminalName): vscode
     if (current && !current.exitStatus) { return current; }
     const terminal = vscode.window.createTerminal({
         name,
+        cwd,
         iconPath: new vscode.ThemeIcon('rocket')
     });
     buildTerminals.set(name, terminal);
@@ -113,11 +114,11 @@ async function buildAndDeployIos(
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
     terminalName?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal(true, terminalName);
+    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath));
     terminal.show();
 
     const shared = sharedBuildProps(projectPath);
-    const noRestore = restoreFlag(projectPath);
+    const noRestore = restoreFlag(projectPath, platform);
     const started = Date.now();
     const result = await runIosBuildCommand(terminal, projectPath, logArgs => {
         const fastProps = iosFastBuildProps(projectPath, config, 'simulator').join(' ');
@@ -189,15 +190,15 @@ async function buildAndDeployIosDevice(
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
     terminalName?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal(true, terminalName);
+    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath));
     terminal.show();
 
     // Build for physical device (needs RuntimeIdentifier ios-arm64)
     const shared = sharedBuildProps(projectPath);
-    const noRestore = restoreFlag(projectPath);
+    const noRestore = restoreFlag(projectPath, platform);
     const started = Date.now();
-    const result = await runIosPhysicalBuild(terminal, projectPath, platform.framework, config, (logArgs, fastProps) => {
-        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -r ios-arm64 ${fastProps} ${shared} ${logArgs}`;
+    const result = await runIosPhysicalBuild(terminal, projectPath, platform.framework, config, (logArgs, fastProps, runtimeIdentifier) => {
+        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -r ${runtimeIdentifier} ${fastProps} ${shared} ${logArgs}`;
         return `echo '▶ Building for device...' && ${buildCmd}`;
     }, 600_000, token, onProgress);
     if (!result.success) {
@@ -310,15 +311,16 @@ async function runIosPhysicalBuild(
     projectPath: string,
     framework: string,
     config: string,
-    commandFactory: (logArgs: string, fastProps: string) => string,
+    commandFactory: (logArgs: string, fastProps: string, runtimeIdentifier: string) => string,
     timeout: number,
     token?: vscode.CancellationToken,
     onProgress?: (elapsedMs: number, buildPercent: number) => void
 ): Promise<BuildResult> {
     const started = Date.now();
+    const runtimeIdentifier = 'ios-arm64';
     const settings = vscode.workspace.getConfiguration('mauideploy', vscode.Uri.file(projectPath));
     const isDebug = config.toLowerCase() === 'debug';
-    const dynamic = isDebug && settings.get<boolean>('ios.useDynamicRegistrar', true);
+    const dynamic = isDebug && settings.get<boolean>('ios.useDynamicRegistrar', false);
     const properties = iosFastBuildProps(projectPath, config, 'physical');
     if (dynamic) { properties.push('-p:Registrar=dynamic'); }
     const mode = dynamic ? 'dynamic' : 'project';
@@ -333,10 +335,9 @@ async function runIosPhysicalBuild(
             if (modeChanged) {
                 fs.mkdirSync(path.dirname(stateFile), { recursive: true });
                 fs.writeFileSync(stateFile, 'pending');
-                reportIosTiming(`Registrar changed or unknown; cleaning ${config} ${framework} ios-arm64 output for ${mode} mode.`);
-                const clean = await runTerminalCommand(terminal,
-                    `dotnet clean ${shellQuote(projectPath)} -f ${shellQuote(framework)} -c ${shellQuote(config)} -r ios-arm64 ${properties.join(' ')}`,
-                    timeout, undefined, showBuildErrors, token);
+                reportIosTiming(`Registrar changed or unknown; restoring and cleaning ${config} ${framework} ${runtimeIdentifier} output for ${mode} mode.`);
+                const clean = await restoreAndCleanProject(terminal, projectPath, framework, config,
+                    runtimeIdentifier, properties, timeout, token);
                 if (!clean.success) { return clean; }
             }
         } catch (error) {
@@ -346,7 +347,7 @@ async function runIosPhysicalBuild(
     }
 
     const result = await runIosBuildCommand(terminal, projectPath,
-        logArgs => commandFactory(logArgs, properties.join(' ')), timeout, token, onProgress);
+        logArgs => commandFactory(logArgs, properties.join(' '), runtimeIdentifier), timeout, token, onProgress);
     if (result.success && modeChanged) {
         try {
             fs.writeFileSync(stateFile, mode);
@@ -358,6 +359,28 @@ async function runIosPhysicalBuild(
     return { ...result, durationMs: Date.now() - started };
 }
 
+async function restoreAndCleanProject(
+    terminal: vscode.Terminal,
+    projectPath: string,
+    framework: string,
+    config: string,
+    runtimeIdentifier: string,
+    properties: string[],
+    timeout: number,
+    token?: vscode.CancellationToken
+): Promise<BuildResult> {
+    const targetArgs = `-r ${shellQuote(runtimeIdentifier)} ${properties.join(' ')}`;
+    const restore = await runTerminalCommand(terminal,
+        `dotnet restore ${shellQuote(projectPath)} -p:TargetFramework=${shellQuote(framework)} -p:Configuration=${shellQuote(config)} ${targetArgs}`,
+        timeout, undefined, showBuildErrors, token);
+    if (!restore.success) { return restore; }
+
+    const clean = await runTerminalCommand(terminal,
+        `dotnet clean ${shellQuote(projectPath)} -f ${shellQuote(framework)} -c ${shellQuote(config)} ${targetArgs}`,
+        timeout, undefined, showBuildErrors, token);
+    return { ...clean, durationMs: restore.durationMs + clean.durationMs };
+}
+
 async function buildAndDeployAndroid(
     projectPath: string,
     platform: Platform,
@@ -367,7 +390,7 @@ async function buildAndDeployAndroid(
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
     terminalName?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal(true, terminalName);
+    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath));
     terminal.show();
 
     const result = await buildAndInstallAndroid(terminal, projectPath, platform, device.id, config, token, onProgress);
@@ -585,7 +608,7 @@ export async function buildOnly(
     terminal.show();
 
     return runBuildCommand(terminal, logArgs => {
-        const buildCmd = `dotnet build ${restoreFlag(projectPath)} "${projectPath}" -f ${platform.framework} -c ${config} ${logArgs}`;
+        const buildCmd = `dotnet build ${restoreFlag(projectPath, platform)} "${projectPath}" -f ${platform.framework} -c ${config} ${logArgs}`;
         return `echo '▶ Pre-building for debug...' && ${buildCmd} && echo '✅ BUILD_DONE'`;
     });
 }
@@ -629,8 +652,9 @@ function sharedBuildProps(projectPath: string, hotReloadPort = DEFAULT_XAML_HOT_
     ].join(' ');
 }
 
-/** Returns '--no-restore' unless the project needs a restore (csproj or related config newer than assets file). */
-function restoreFlag(projectPath: string): string {
+/** iOS uses SDK incremental restore; other builds retain the timestamp-based optimization. */
+function restoreFlag(projectPath: string, platform: Platform): string {
+    if (platform.name === 'iOS') { return ''; }
     try {
         const projectDir = path.dirname(projectPath);
         const assetsFile = path.join(projectDir, 'obj', 'project.assets.json');
@@ -686,16 +710,15 @@ export async function buildForDebug(
         : `-p:EmbedAssembliesIntoApk=true ${androidFastBuildProps(config).join(' ')}`;
 
     const shared = sharedBuildProps(projectPath, hotReloadPort);
-    const noRestore = restoreFlag(projectPath);
-    const rid = platform.name === 'iOS' && deviceType === 'physical' ? ' -r ios-arm64' : '';
+    const noRestore = restoreFlag(projectPath, platform);
     if (platform.name === 'iOS' && deviceType === 'physical') {
-        return runIosPhysicalBuild(terminal, projectPath, platform.framework, config, (logArgs, fastProps) => {
-            const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -p:MtouchDebug=true ${fastProps}${rid} ${shared} ${logArgs}`;
+        return runIosPhysicalBuild(terminal, projectPath, platform.framework, config, (logArgs, fastProps, runtimeIdentifier) => {
+            const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} -p:MtouchDebug=true ${fastProps} -r ${runtimeIdentifier} ${shared} ${logArgs}`;
             return `echo 'Building for debug...' && ${buildCmd}`;
         }, 600_000, token, onProgress);
     }
     return runBuildCommand(terminal, logArgs => {
-        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${extraProps}${rid} ${shared} ${logArgs}`;
+        const buildCmd = `dotnet build ${noRestore} "${projectPath}" -f ${platform.framework} -c ${config} ${extraProps} ${shared} ${logArgs}`;
         return `echo '▶ Building for debug...' && ${buildCmd} && echo '✅ BUILD_DONE'`;
     }, 600_000, token, onProgress);
 }
@@ -3570,6 +3593,8 @@ async function runTerminalCommand(
     }
 
     const exitCodeFile = tempFilePath('.exit');
+    const pendingExitCodeFile = `${exitCodeFile}.pending`;
+    const outputFile = tempFilePath('.output.log');
     const started = Date.now();
 
     try { fs.rmSync(exitCodeFile, { force: true }); } catch { }
@@ -3582,24 +3607,29 @@ async function runTerminalCommand(
     // A trap ensures Ctrl+C still writes the exit code file (zsh aborts sourced
     // scripts on SIGINT, so the normal printf after the command wouldn't run).
     const scriptFile = tempFilePath('.sh');
-    const exitCapture = `printf '%s' $_ec > ${shellQuote(exitCodeFile)}`;
+    const exitCapture = `printf '%s' $_ec > ${shellQuote(pendingExitCodeFile)}`;
     const trapLine = `trap 'printf "%s" 130 > ${shellQuote(exitCodeFile)}; trap - INT' INT`;
     // Save $? into _ec BEFORE `trap - INT` — in zsh, trap is a builtin that
     // returns 0, so $? would be clobbered if we read it after the trap reset.
-    fs.writeFileSync(scriptFile, `printf '\x1b[A\x1b[2K'\n${trapLine}\n${command}\n_ec=$?; trap - INT\n${exitCapture}\n`, 'utf8');
-    terminal.sendText(`. ${shellQuote(scriptFile)}; rm -f ${shellQuote(scriptFile)}`);
-    const exitCode = await waitForExitCodeFile(exitCodeFile, timeout, terminal, token, onProgress, progressLogFile);
-    const durationMs = Date.now() - started;
-    const output = errorLogFile ? readTextFile(errorLogFile) : '';
+    try {
+        fs.writeFileSync(scriptFile, `printf '\x1b[A\x1b[2K'\n${trapLine}\n{\n${command}\n_ec=$?\n${exitCapture}\n} 2>&1 | tee ${shellQuote(outputFile)}\ntrap - INT\nmv -f ${shellQuote(pendingExitCodeFile)} ${shellQuote(exitCodeFile)}\n`, 'utf8');
+        terminal.sendText(`. ${shellQuote(scriptFile)}; rm -f ${shellQuote(scriptFile)}`);
+        const exitCode = await waitForExitCodeFile(exitCodeFile, timeout, terminal, token, onProgress, progressLogFile);
+        const durationMs = Date.now() - started;
+        const errorOutput = errorLogFile ? readTextFile(errorLogFile) : '';
+        const output = errorOutput.trim() ? errorOutput : readTextFile(outputFile);
 
-    try { fs.rmSync(exitCodeFile, { force: true }); } catch { }
+        const cancelled = exitCode === undefined || exitCode === 130;
+        if (exitCode !== 0 && !cancelled) {
+            onFailure(output, exitCode, command);
+        }
 
-    const cancelled = exitCode === undefined || exitCode === 130;
-    if (exitCode !== 0 && !cancelled) {
-        onFailure(output, exitCode, command);
+        return { success: exitCode === 0, durationMs, cancelled };
+    } finally {
+        for (const filename of [exitCodeFile, pendingExitCodeFile, outputFile, scriptFile]) {
+            try { fs.rmSync(filename, { force: true }); } catch { }
+        }
     }
-
-    return { success: exitCode === 0, durationMs, cancelled };
 }
 
 /** MSBuild properties that speed up Android Debug builds by disabling
@@ -3654,11 +3684,13 @@ function showBuildErrors(output: string, exitCode: number | undefined, command: 
     channel.clear();
     channel.appendLine('MAUI Deploy build failed');
     channel.appendLine(`Exit code: ${exitCode ?? 'timed out'}`);
+    channel.appendLine(`Command: ${command}`);
     channel.appendLine('');
 
     if (errors.length === 0) {
         channel.appendLine('No compiler error lines were found in the captured build output.');
-        channel.appendLine('Open the build terminal for the full command output.');
+        channel.appendLine('');
+        channel.appendLine(stripAnsi(output).trim() || 'No command output was captured.');
     } else {
         channel.appendLine(`${errors.length} error${errors.length === 1 ? '' : 's'} found:`);
         channel.appendLine('');
@@ -3671,7 +3703,7 @@ function showBuildErrors(output: string, exitCode: number | undefined, command: 
 
     const message = errors.length > 0
         ? `MAUI Deploy: Build failed with ${errors.length} error${errors.length === 1 ? '' : 's'}.`
-        : 'MAUI Deploy: Build failed. No compiler error lines were found.';
+        : 'MAUI Deploy: Build failed. See Build Errors for command output.';
     vscode.window.showErrorMessage(message, 'Ask Copilot to Fix', 'Open Build Errors', 'Open Terminal').then(choice => {
         if (choice === 'Ask Copilot to Fix') {
             void askCopilotToFixLastBuildFailure();
@@ -3768,7 +3800,7 @@ function createCopilotRepairPrompt(failure: BuildFailureContext): string {
         formatErrorsForPrompt(failure.errors),
         '```',
         '',
-        'Captured MSBuild error log:',
+        'Captured command output:',
         '```text',
         truncateForPrompt(failure.output, 12000),
         '```',
@@ -3777,7 +3809,7 @@ function createCopilotRepairPrompt(failure: BuildFailureContext): string {
 
 function formatErrorsForPrompt(errors: string[]): string {
     if (errors.length === 0) {
-        return 'No compiler error lines were found in the captured MSBuild error log.';
+        return 'No compiler error lines were found in the captured command output.';
     }
 
     const maxErrors = 50;
@@ -3793,7 +3825,7 @@ function formatErrorsForPrompt(errors: string[]): string {
 function truncateForPrompt(value: string, maxCharacters: number): string {
     const text = stripAnsi(value).trim();
     if (!text) {
-        return 'No MSBuild error log content was captured.';
+        return 'No command output was captured.';
     }
     if (text.length <= maxCharacters) {
         return text;

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+    <title>MauiDeploy</title>
+    <style>
+        :root { color-scheme: light; --ink: #202b28; --muted: #52615c; --accent: #126d54; --line: #dce5e0; }
+        * { box-sizing: border-box; letter-spacing: 0; }
+        body { margin: 0; min-height: 100vh; padding: 64px 24px; color: var(--ink); font-family: "Aptos", "Trebuchet MS", sans-serif; background: #f8faf9; background-image: linear-gradient(#dce5e04d 1px, transparent 1px); background-size: 100% 32px; }
+        main { max-width: 480px; margin: 12vh auto 0; }
+        header { display: flex; align-items: center; gap: 16px; margin-bottom: 40px; }
+        img { width: 64px; height: 64px; object-fit: contain; }
+        h1 { font-size: 30px; line-height: 1.2; margin: 0; font-weight: 700; }
+        h2 { font-size: 20px; line-height: 1.4; margin: 0 0 12px; }
+        p { color: var(--muted); font-size: 15px; line-height: 1.6; margin: 0 0 28px; overflow-wrap: anywhere; }
+        section { border-top: 2px solid var(--accent); padding-top: 24px; }
+        a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; max-width: 100%; padding: 12px 18px; border-radius: 6px; color: #fff; background: var(--accent); font-size: 15px; font-weight: 700; text-decoration: none; text-align: center; overflow-wrap: anywhere; }
+        a:hover { background: #0c533f; }
+        a:focus-visible { outline: 3px solid #bc653a; outline-offset: 4px; }
+        [hidden] { display: none; }
+        @media (max-width: 480px) { body { padding: 40px 24px; } main { margin-top: 8vh; } header { margin-bottom: 32px; } h1 { font-size: 26px; } }
+        @media (prefers-reduced-motion: no-preference) { main { animation: appear 180ms ease-out; } @keyframes appear { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } } }
+    </style>
+</head>
+<body>
+    <main>
+        <header><img src="icon.png" alt="" width="64" height="64"><h1>MauiDeploy</h1></header>
+        <section aria-live="polite">
+            <h2 id="status">Opening Visual Studio Code</h2>
+            <p id="target"></p>
+            <a id="open" hidden>Open Visual Studio Code</a>
+        </section>
+        <noscript><p>JavaScript is disabled. Automatic opening is unavailable.</p></noscript>
+    </main>
+    <script>
+        function deploymentTarget(fragment) {
+            const parameters = new URLSearchParams(fragment.replace(/^#/, ''));
+            const keys = [...parameters.keys()];
+            if (keys.some(key => !['repo', 'pr', 'editor'].includes(key)) || new Set(keys).size !== keys.length) {
+                throw new Error('Invalid parameters');
+            }
+            const repository = new URL(parameters.get('repo'));
+            if (repository.protocol !== 'https:' || repository.username || repository.password || repository.port ||
+                repository.search || repository.hash || !/^\/[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repository.pathname)) {
+                throw new Error('Invalid repository');
+            }
+            const pullRequest = parameters.get('pr');
+            if (!/^[1-9][0-9]*$/.test(pullRequest) || !Number.isSafeInteger(Number(pullRequest))) {
+                throw new Error('Invalid pull request');
+            }
+            const editor = parameters.get('editor') || 'vscode';
+            if (!['vscode', 'vscode-insiders'].includes(editor)) { throw new Error('Invalid editor'); }
+            const query = new URLSearchParams({ repo: repository.href, pr: pullRequest });
+            return {
+                uri: `${editor}://FinstadProductions.maui-deploy/deploy-pr?${query}`,
+                label: `${repository.hostname}${repository.pathname} / PR #${pullRequest}`
+            };
+        }
+
+        try {
+            const target = deploymentTarget(location.hash);
+            document.getElementById('target').textContent = target.label;
+            const open = document.getElementById('open');
+            open.href = target.uri;
+            open.hidden = false;
+            location.assign(target.uri);
+        } catch {
+            document.getElementById('status').textContent = 'Invalid deployment link';
+            document.getElementById('target').textContent = 'The repository or pull request is missing or invalid.';
+        }
+    </script>
+</body>
+</html>

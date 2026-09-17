@@ -2,7 +2,7 @@
   "name": "maui-deploy",
   "displayName": "MauiDeploy",
   "description": "Rider-like toolbar for building, deploying, and debugging with Hot-Reload in .NET MAUI apps",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": "FinstadProductions",
   "publisher": "FinstadProductions",
   "license": "MIT",
@@ -32,6 +32,8 @@
   "icon": "icon.png",
   "activationEvents": [
     "onDebug",
+    "onUri",
+    "onStartupFinished",
     "workspaceContains:**/*.csproj"
   ],
   "main": "./out/extension.js",
@@ -63,9 +65,9 @@
         },
         "mauideploy.ios.useDynamicRegistrar": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "scope": "resource",
-          "description": "Speed up physical iOS Debug builds with the dynamic registrar for both Run and Debug. Turn this off if the app crashes; the next Run or Debug cleans and rebuilds using the project's registrar settings. Also cleans on first use. Overrides an explicit project Registrar value when enabled. Release and simulator builds are unchanged."
+          "description": "Opt in to faster physical iOS Debug builds with the dynamic registrar for both Run and Debug. Disabled by default to retain the project's registrar settings. Turn this off if the app crashes; the next Run or Debug cleans and rebuilds using the project's registrar settings. Also cleans on first use. Overrides an explicit project Registrar value when enabled. Release and simulator builds are unchanged."
         },
         "mauideploy.ios.collectBinlogs": {
           "type": "boolean",
@@ -130,6 +132,21 @@
       }
     ],
     "commands": [
+      {
+        "command": "mauideploy.deployBranch",
+        "title": "MAUI Deploy: Deploy Branch or PR",
+        "icon": "$(git-pull-request-go-to-changes)"
+      },
+      {
+        "command": "mauideploy.setupBranchDeploy",
+        "title": "MAUI Deploy: Set Up Branch Deployment",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "mauideploy.screenshot",
+        "title": "MAUI Deploy: Take Screenshot",
+        "icon": "$(device-camera)"
+      },
       {
         "command": "mauideploy.run",
         "title": "MAUI Deploy: Run",

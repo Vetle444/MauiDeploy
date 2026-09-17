@@ -10,6 +10,9 @@ import {
     findIosAppBundle, findAndroidApk, getAndroidPackageId
 } from './devices';
 import { findWorkspaceMauiProjects, findWorkspaceCsprojs, findCsprojsInDir } from './projects';
+import { registerScreenshotCommand } from './screenshotCommand';
+import { deployBranch, registerBranchSetup } from './branchDeploy';
+import { parseDeployLink, PullRequestReference } from './branchSources';
 import {
     buildAndDeploy, deployFromBin, buildForDebug, cancelBuildTerminals, disposeTerminals,
     askCopilotToFixLastBuildFailure, runTests,
@@ -44,6 +47,7 @@ let isBuilding = false;
 
 type OperationCommand =
     | 'mauideploy.run'
+    | 'mauideploy.deployBranch'
     | 'mauideploy.runMultiple'
     | 'mauideploy.deployFromBin'
     | 'mauideploy.debug'
@@ -72,6 +76,7 @@ const lastAppliedXamlByFile = new Map<string, string>();
 // ── Status Bar ─────────────────────────────────────────
 
 let sbRun: vscode.StatusBarItem;
+let sbBranch: vscode.StatusBarItem;
 let sbRunMultiple: vscode.StatusBarItem;
 let sbDeployFromBin: vscode.StatusBarItem;
 let sbDebug: vscode.StatusBarItem;
@@ -79,6 +84,8 @@ let sbTests: vscode.StatusBarItem;
 let sbProject: vscode.StatusBarItem;
 let sbConfig: vscode.StatusBarItem;
 let sbDevice: vscode.StatusBarItem;
+let sbScreenshot: vscode.StatusBarItem;
+let isTakingScreenshot = false;
 
 
 // ── Lifecycle ──────────────────────────────────────────
@@ -89,6 +96,20 @@ export function activate(context: vscode.ExtensionContext) {
     loadState();
     createStatusBar(context);
     registerCommands(context);
+    registerBranchSetup(context);
+    context.subscriptions.push(vscode.window.registerUriHandler({
+        async handleUri(uri) {
+            try {
+                await cmdDeployBranch(parseDeployLink(uri.toString(), vscode.env.uriScheme));
+            } catch (error) {
+                void vscode.window.showErrorMessage(`MAUI Deploy: ${error instanceof Error ? error.message : String(error)}`);
+            }
+        }
+    }));
+    registerScreenshotCommand(context, () => state.deviceId, busy => {
+        isTakingScreenshot = busy;
+        updateStatusBar();
+    });
     registerDebugHotReload(context);
     registerDebugAdapterFactory(context);
     autoDetectProject();
@@ -133,6 +154,11 @@ function createStatusBar(context: vscode.ExtensionContext) {
     sbRun.command = 'mauideploy.run';
     context.subscriptions.push(sbRun);
 
+    sbBranch = vscode.window.createStatusBarItem('mauideploy.deployBranch', vscode.StatusBarAlignment.Left, 100.9);
+    sbBranch.name = 'MAUI Deploy Branch';
+    sbBranch.command = 'mauideploy.deployBranch';
+    context.subscriptions.push(sbBranch);
+
     sbRunMultiple = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100.75);
     sbRunMultiple.command = 'mauideploy.runMultiple';
     context.subscriptions.push(sbRunMultiple);
@@ -161,10 +187,27 @@ function createStatusBar(context: vscode.ExtensionContext) {
     sbDevice.command = 'mauideploy.pickDevice';
     context.subscriptions.push(sbDevice);
 
+    sbScreenshot = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 96);
+    context.subscriptions.push(sbScreenshot);
+
     updateStatusBar();
 }
 
 function updateStatusBar() {
+    if (!isBuilding) {
+        sbBranch.text = '$(git-pull-request-go-to-changes)';
+        sbBranch.command = 'mauideploy.deployBranch';
+        sbBranch.color = '#4ec9b0';
+        sbBranch.backgroundColor = undefined;
+        sbBranch.tooltip = 'Deploy Branch or PR using a separate worktree. Setup: mauideploy setup in a new VS Code terminal.';
+    }
+    sbBranch.show();
+
+    sbScreenshot.text = isTakingScreenshot ? '$(loading~spin)' : '$(device-camera)';
+    sbScreenshot.command = isTakingScreenshot ? undefined : 'mauideploy.screenshot';
+    sbScreenshot.tooltip = 'Take a device screenshot and copy it to the clipboard';
+    if (process.platform === 'darwin') { sbScreenshot.show(); }
+
     // ── Run button ──
     if (!isBuilding) {
         sbRun.command = 'mauideploy.run';
@@ -520,6 +563,7 @@ function toolsForDeployTargets(targets: DeployTarget[]): ToolRequirement[] {
 function registerCommands(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('mauideploy.run', cmdRun),
+        vscode.commands.registerCommand('mauideploy.deployBranch', () => cmdDeployBranch()),
         vscode.commands.registerCommand('mauideploy.runMultiple', cmdRunMultiple),
         vscode.commands.registerCommand('mauideploy.deployFromBin', cmdDeployFromBin),
         vscode.commands.registerCommand('mauideploy.debug', cmdDebug),
@@ -954,6 +998,33 @@ function stripUtf8Bom(value: string): string {
 }
 
 // ── Run ────────────────────────────────────────────────
+
+async function cmdDeployBranch(pullRequest?: PullRequestReference) {
+    if (isBuilding) {
+        void vscode.window.showInformationMessage('MAUI Deploy is busy. Finish or stop the current operation before deploying a branch.');
+        return;
+    }
+    if (vscode.debug.activeDebugSession?.type === 'mauideploy') {
+        void vscode.window.showErrorMessage('Stop the active MAUI debug session before deploying a branch to its device.');
+        return;
+    }
+    const operation = beginOperation('mauideploy.deployBranch', sbBranch);
+    showStopButton(sbBranch, 'Selecting branch');
+    const reporter = createStatusBarReporter(sbBranch, 'Deploying branch');
+    try {
+        await deployBranch(ctx, operation.cancellation.token, (message, elapsedMs, percent) => {
+            if (elapsedMs !== undefined && percent !== undefined) { reporter(elapsedMs, percent); }
+            else { showStopButton(sbBranch, message); }
+        }, state.projectPath, pullRequest);
+    } catch (error) {
+        if (!operation.cancellation.token.isCancellationRequested && !(error instanceof vscode.CancellationError)) {
+            void vscode.window.showErrorMessage(`MAUI Deploy: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    } finally {
+        finishOperation(operation);
+        updateStatusBar();
+    }
+}
 
 async function cmdRun() {
     if (isBuilding) { return; }

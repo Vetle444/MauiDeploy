@@ -125,23 +125,76 @@ function buildPhysical(fixture, config = 'Debug') {
         (logs, properties) => `dotnet build ${properties} ${logs}`, 1000, token);
 }
 
-test('dynamic registrar defaults on, cleans once, and cleans when disabled', async () => {
-    const fixture = harness(Array.from({ length: 5 }, () => ({ success: true, durationMs: 100 })));
-    assert.equal((await buildPhysical(fixture)).durationMs, 200);
-    assert.match(fixture.commands[0], /dotnet clean.*-f 'net10.0-ios'.*-c 'Debug'.*-r ios-arm64/);
-    assert.match(fixture.commands[1], /-p:Registrar=dynamic/);
-    await buildPhysical(fixture);
-    assert.match(fixture.commands[2], /dotnet build.*-p:Registrar=dynamic/);
-    fixture.settings['ios.useDynamicRegistrar'] = false;
-    await buildPhysical(fixture);
-    assert.match(fixture.commands[3], /dotnet clean/);
-    assert.doesNotMatch(fixture.commands[4], /Registrar=/);
+test('registrar clean restores the selected target and properties before clean and build', async () => {
+    const fixture = harness(Array.from({ length: 3 }, () => ({ success: true, durationMs: 100 })));
+    fixture.settings['ios.useDynamicRegistrar'] = true;
+    const result = await fixture.runIosPhysicalBuild({}, '/tmp/Custom App.csproj', 'net9.0-ios', 'dEbUg',
+        (logs, properties) => `dotnet build ${properties} ${logs}`, 1000, token);
+    assert.equal(result.success, true);
+    assert.equal(result.durationMs, 300);
+    assert.equal(fixture.commands.length, 3);
+    const [restore, clean, build] = fixture.commands;
+    assert.match(restore, /^dotnet restore '\/tmp\/Custom App.csproj'/);
+    assert.match(restore, /-p:TargetFramework='net9.0-ios'/);
+    assert.match(restore, /-p:Configuration='dEbUg'/);
+    assert.doesNotMatch(restore, /(?:^|\s)-(?:f|c)\s|--no-dependencies|--no-restore/);
+    assert.match(clean, /^dotnet clean '\/tmp\/Custom App.csproj'.*-f 'net9.0-ios'.*-c 'dEbUg'/);
+    assert.match(build, /^dotnet build/);
+    for (const command of [restore, clean]) {
+        assert.match(command, /-r 'ios-arm64'/);
+        for (const property of ['EnableTrimAnalyzer=false', 'EnableSingleFileAnalyzer=false', 'UseInterpreter=true', 'MtouchLink=None', 'Registrar=dynamic']) {
+            assert.ok(command.includes(`-p:${property}`), property);
+        }
+    }
 });
 
-test('failed or cancelled registrar clean blocks build and is retried', async () => {
+test('Run and Debug retain project registrar settings by default and when explicitly disabled', async () => {
+    const platform = { name: 'iOS', framework: 'net10.0-ios' };
+    for (const enabled of [undefined, false]) {
+        for (const action of ['Run', 'Debug']) {
+            const fixture = harness(Array.from({ length: 8 }, () => ({ success: true, durationMs: 100 })));
+            fixture.settings['ios.useDynamicRegistrar'] = enabled;
+            const build = () => action === 'Run'
+                ? fixture.buildAndDeployIosDevice('/tmp/Test.csproj', platform, device, 'Debug', token)
+                : fixture.buildForDebug('/tmp/Test.csproj', platform, 'Debug', 'physical', token);
+            assert.equal((await build()).success, true);
+            assert.match(fixture.commands[0], /^dotnet restore/);
+            assert.match(fixture.commands[1], /^dotnet clean/);
+            assert.equal([...fixture.state.values()][0], 'project');
+            const initialCount = fixture.commands.length;
+            assert.equal((await build()).success, true);
+            assert.equal(fixture.commands.length - initialCount, action === 'Run' ? 3 : 1);
+            for (const command of fixture.commands) {
+                assert.doesNotMatch(command, /Registrar=/);
+            }
+        }
+    }
+});
+
+test('dynamic registrar opt-in cleans once and returning to the default cleans again', async () => {
+    const fixture = harness(Array.from({ length: 7 }, () => ({ success: true, durationMs: 100 })));
+    fixture.settings['ios.useDynamicRegistrar'] = true;
+    assert.equal((await buildPhysical(fixture)).durationMs, 300);
+    assert.match(fixture.commands[0], /dotnet restore/);
+    assert.match(fixture.commands[1], /dotnet clean.*-f 'net10.0-ios'.*-c 'Debug'.*-r 'ios-arm64'/);
+    assert.match(fixture.commands[2], /-p:Registrar=dynamic/);
+    await buildPhysical(fixture);
+    assert.equal(fixture.commands.length, 4);
+    assert.match(fixture.commands[3], /dotnet build.*-p:Registrar=dynamic/);
+    delete fixture.settings['ios.useDynamicRegistrar'];
+    await buildPhysical(fixture);
+    assert.match(fixture.commands[4], /dotnet restore/);
+    assert.match(fixture.commands[5], /dotnet clean/);
+    for (const command of fixture.commands.slice(4)) {
+        assert.doesNotMatch(command, /Registrar=/);
+    }
+});
+
+test('failed or cancelled registrar restore blocks clean and build and is retried', async () => {
     for (const cancelled of [false, true]) {
         const fixture = harness([
             { success: false, cancelled, durationMs: 100 },
+            { success: true, durationMs: 100 },
             { success: true, durationMs: 100 },
             { success: true, durationMs: 100 }
         ]);
@@ -149,25 +202,65 @@ test('failed or cancelled registrar clean blocks build and is retried', async ()
         assert.equal(result.success, false);
         assert.equal(result.cancelled, cancelled);
         assert.equal(fixture.commands.length, 1);
+        assert.match(fixture.commands[0], /^dotnet restore/);
+        assert.equal([...fixture.state.values()][0], 'pending');
         assert.equal((await buildPhysical(fixture)).success, true);
-        assert.match(fixture.commands[1], /dotnet clean/);
+        assert.match(fixture.commands[1], /^dotnet restore/);
+        assert.match(fixture.commands[2], /^dotnet clean/);
+        assert.match(fixture.commands[3], /^dotnet build/);
+    }
+});
+
+test('restore failure prevents Run deployment and Debug build', async () => {
+    const platform = { name: 'iOS', framework: 'net10.0-ios' };
+    for (const action of ['Run', 'Debug']) {
+        const fixture = harness([{ success: false, durationMs: 100 }]);
+        const result = action === 'Run'
+            ? await fixture.buildAndDeployIosDevice('/tmp/Test.csproj', platform, device, 'Debug', token)
+            : await fixture.buildForDebug('/tmp/Test.csproj', platform, 'Debug', 'physical', token);
+        assert.equal(result.success, false);
+        assert.equal(fixture.commands.length, 1);
+        assert.match(fixture.commands[0], /^dotnet restore/);
+    }
+});
+
+test('failed or cancelled registrar clean blocks build and is retried', async () => {
+    for (const cancelled of [false, true]) {
+        const fixture = harness([
+            { success: true, durationMs: 100 },
+            { success: false, cancelled, durationMs: 100 },
+            { success: true, durationMs: 100 },
+            { success: true, durationMs: 100 },
+            { success: true, durationMs: 100 }
+        ]);
+        const result = await buildPhysical(fixture);
+        assert.equal(result.success, false);
+        assert.equal(result.cancelled, cancelled);
+        assert.equal(fixture.commands.length, 2);
+        assert.equal((await buildPhysical(fixture)).success, true);
+        assert.match(fixture.commands[2], /dotnet restore/);
+        assert.match(fixture.commands[3], /dotnet clean/);
     }
 });
 
 test('failed registrar switch build leaves pending state and forces a clean retry', async () => {
     const fixture = harness([
         { success: true, durationMs: 100 },
+        { success: true, durationMs: 100 },
         { success: false, durationMs: 100 },
+        { success: true, durationMs: 100 },
         { success: true, durationMs: 100 },
         { success: true, durationMs: 100 }
     ]);
     assert.equal((await buildPhysical(fixture)).success, false);
     assert.equal((await buildPhysical(fixture)).success, true);
-    assert.match(fixture.commands[2], /dotnet clean/);
+    assert.match(fixture.commands[3], /dotnet restore/);
+    assert.match(fixture.commands[4], /dotnet clean/);
 });
 
 test('Release and simulator retain their registrar and interpreter settings', async () => {
     const fixture = harness([{ success: true, durationMs: 100 }]);
+    fixture.settings['ios.useDynamicRegistrar'] = true;
     await buildPhysical(fixture, 'Release');
     assert.equal(fixture.commands.length, 1);
     assert.doesNotMatch(fixture.commands[0], /Registrar=|dotnet clean|UseInterpreter|MtouchLink/);
@@ -177,13 +270,15 @@ test('Release and simulator retain their registrar and interpreter settings', as
 });
 
 test('Debug uses the same registrar preparation and retains Mono debug support', async () => {
-    const fixture = harness(Array.from({ length: 2 }, () => ({ success: true, durationMs: 100 })));
+    const fixture = harness(Array.from({ length: 3 }, () => ({ success: true, durationMs: 100 })));
+    fixture.settings['ios.useDynamicRegistrar'] = true;
     const platform = { name: 'iOS', framework: 'net10.0-ios' };
     const result = await fixture.buildForDebug('/tmp/Test.csproj', platform, 'Debug', 'physical', token);
     assert.equal(result.success, true);
-    assert.match(fixture.commands[0], /dotnet clean/);
-    assert.match(fixture.commands[1], /-p:MtouchDebug=true/);
-    assert.match(fixture.commands[1], /-p:Registrar=dynamic/);
+    assert.match(fixture.commands[0], /dotnet restore/);
+    assert.match(fixture.commands[1], /dotnet clean/);
+    assert.match(fixture.commands[2], /-p:MtouchDebug=true/);
+    assert.match(fixture.commands[2], /-p:Registrar=dynamic/);
 
     const simulator = harness([{ success: true, durationMs: 100 }]);
     await simulator.buildForDebug('/tmp/Test.csproj', platform, 'Debug', 'simulator', token);
@@ -191,11 +286,12 @@ test('Debug uses the same registrar preparation and retains Mono debug support',
     assert.doesNotMatch(simulator.commands[0], /Registrar=|dotnet clean/);
 });
 
-test('registrar setting is enabled by default and documents the crash fallback', () => {
+test('registrar setting is opt-in and documents the crash fallback', () => {
     const manifest = require('../package.json');
     const setting = manifest.contributes.configuration.properties['mauideploy.ios.useDynamicRegistrar'];
-    assert.equal(setting.default, true);
+    assert.equal(setting.default, false);
     assert.equal(setting.scope, 'resource');
+    assert.match(setting.description, /Opt in/);
     assert.match(setting.description, /off if the app crashes/);
 });
 
@@ -209,7 +305,7 @@ test('iOS Run and Debug skip compatibility analyzers only in Debug and allow opt
         for (const config of ['Debug', 'Release']) {
             for (const enabled of [undefined, false]) {
                 for (const action of ['Run', 'Debug']) {
-                    const fixture = harness(Array.from({ length: 4 }, () => ({ success: true, durationMs: 100 })));
+                    const fixture = harness(Array.from({ length: 5 }, () => ({ success: true, durationMs: 100 })));
                     fixture.settings['ios.skipCompatibilityAnalyzers'] = enabled;
                     if (action === 'Debug') {
                         await fixture.buildForDebug('/tmp/Test.csproj', platform, config, deviceType, token);

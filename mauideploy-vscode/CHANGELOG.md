@@ -2,6 +2,48 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## Unreleased
+
+### Added
+- Add Deploy Branch with searchable local/remote branches and GitHub or GitHub Enterprise PR URLs, using a reusable detached worktree without changing the active checkout.
+- Add `mauideploy setup` in new VS Code terminals to remember a separate project, configuration, device, and same-repository PR authorization.
+- Add PR URI handling and `mauideploy pr-link`, with an automatically opening HTTPS bridge and a manual GitHub Pages publishing workflow. Hosting must be enabled separately.
+- Protect dirty worktrees, concurrent deployments, repository identity, fork PR execution, and fetched PR commit consistency; retain cancellation and ordinary Run/Debug selections.
+
+### Fixed
+- Start Run build terminals in the selected project's directory, including branch worktrees, so SDK selection uses the correct `global.json`.
+
+## 1.5.0 - 2026-09-14
+
+### Added
+- Add a macOS screenshot camera button and independent device picker, prioritizing the current deployment target without changing it.
+- Capture PNG screenshots from physical iPhones through the native macOS tunnel, booted iOS simulators, and authorized Android devices/emulators without creating image files.
+- Open screenshots in an in-memory VS Code preview and automatically copy the image to the macOS clipboard.
+- Offer isolated, cancellable first-use installation of a versioned physical-iPhone helper and managed Python, without changing project or global Python dependencies.
+- Add screenshot progress diagnostics and timeout messages without logging image contents, and retain the preview if clipboard copying fails.
+
+## 1.4.3 - 2026-09-14
+
+### Changed
+- Make the physical iOS Debug dynamic registrar opt-in, retaining project registrar settings by default. Explicit opt-ins remain supported; returning from dynamic mode restores, cleans and rebuilds the selected target.
+
+### Fixed
+- Restore the selected framework, configuration, runtime and project references before registrar-triggered iOS clean, preventing NETSDK1047 after simulator/device or Test/Debug switches. Stop on restore failure and retain normal incremental builds when no clean is needed.
+- Preserve command stdout/stderr when the MSBuild error log is missing or empty, including clean/restore failures and non-compiler errors in Build Errors and Copilot repair prompts.
+
+## 1.4.2 - 2026-09-10
+
+### Fixed
+- Restore the iOS and Android Debug compatibility-analysis optimizations and settings that were missing from the 1.4.1 package.
+- Restore dynamic registrar support for physical iOS Debug Run and Debug, including clean-on-switch handling and the project-settings fallback.
+- Restore iOS build/deploy timings, optional binlogs, and awaited installation and launch with failure and cancellation handling.
+- Retain the 1.4.1 incremental iOS restore fix for simulator and physical-device target changes, with regression coverage alongside the restored deployment tests.
+
+## 1.4.1 - 2026-09-09
+
+### Fixed
+- Use normal incremental NuGet restore for iOS Run, Debug and pre-builds, preventing NETSDK1047 after switching between simulator and physical-device targets.
+
 ## 1.4.0 - 2026-09-09
 
 ### Added

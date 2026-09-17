@@ -19,6 +19,8 @@ export interface Device {
     platform: 'iOS' | 'Android';
     type: 'simulator' | 'physical';
     runtime?: string;
+    available?: boolean;
+    transport?: 'USB' | 'Wi-Fi';
 }
 
 export interface RecentDevice {
@@ -65,12 +67,19 @@ export async function detectAllDevices(platforms: Platform[]): Promise<Device[]>
     return devices;
 }
 
+export async function detectScreenshotDevices(): Promise<Device[]> {
+    const groups = await Promise.all([
+        detectIosPhysicalDevices(), detectIosSimulators(), detectAndroidDevices(),
+    ]);
+    return groups.flat().filter(device => device.available !== false && device.state !== 'Shutdown');
+}
+
 async function detectIosPhysicalDevices(): Promise<Device[]> {
     const devices: Device[] = [];
     try {
         const { stdout } = await execFileAsync('xcrun', [
-            'devicectl', 'list', 'devices', '--json-output', '-'
-        ]);
+            'devicectl', 'list', 'devices', '--quiet', '--json-output', '/dev/stdout'
+        ], { timeout: 15_000 });
         const data = JSON.parse(stdout);
         const deviceList = data?.result?.devices;
         if (!Array.isArray(deviceList)) { return devices; }
@@ -89,6 +98,9 @@ async function detectIosPhysicalDevices(): Promise<Device[]> {
             if (!udid) { continue; }
 
             const osVersion = props.osVersionNumber ? `iOS ${props.osVersionNumber}` : 'iOS';
+            let transport: Device['transport'];
+            if (conn?.transportType === 'localNetwork') { transport = 'Wi-Fi'; }
+            if (conn?.transportType === 'wired') { transport = 'USB'; }
             devices.push({
                 name,
                 id: udid,
@@ -96,6 +108,8 @@ async function detectIosPhysicalDevices(): Promise<Device[]> {
                 platform: 'iOS',
                 type: 'physical',
                 runtime: osVersion,
+                available: conn?.tunnelState !== 'unavailable',
+                transport,
                 display: `${name} — ${osVersion}`
             });
         }
@@ -106,7 +120,7 @@ async function detectIosPhysicalDevices(): Promise<Device[]> {
 async function detectIosSimulators(): Promise<Device[]> {
     const devices: Device[] = [];
     try {
-        const { stdout } = await execFileAsync('xcrun', ['simctl', 'list', 'devices', '--json']);
+        const { stdout } = await execFileAsync('xcrun', ['simctl', 'list', 'devices', '--json'], { timeout: 15_000 });
         const data = JSON.parse(stdout);
 
         for (const [runtime, devList] of Object.entries(data.devices)) {
@@ -145,7 +159,7 @@ async function detectIosSimulators(): Promise<Device[]> {
 async function detectAndroidDevices(): Promise<Device[]> {
     const devices: Device[] = [];
     try {
-        const { stdout } = await execFileAsync('adb', ['devices', '-l']);
+        const { stdout } = await execFileAsync('adb', ['devices', '-l'], { timeout: 15_000 });
         for (const line of stdout.split('\n').slice(1)) {
             if (!line.trim()) { continue; }
             const parts = line.split(/\s+/);

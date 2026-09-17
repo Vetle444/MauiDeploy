@@ -7,7 +7,9 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 - Select a MAUI project from the current workspace
 - Choose Debug or Release configuration from the status bar
 - Pick iOS simulators, paired iOS devices, or Android devices
+- Take device screenshots on macOS, open an in-memory preview, and automatically copy the image to the clipboard
 - Build and deploy MAUI apps without leaving VS Code
+- Deploy a branch or GitHub PR from a reusable, isolated worktree while an agent keeps working in your checkout
 - Deploy MAUI apps from the existing `bin` output without rebuilding
 - Debug MAUI apps with the bundled Mono SDB adapter and experimental XAML Hot Reload on save
 - Start a Debug-only experimental `dotnet watch` rebuild/rerun watcher from the status bar
@@ -19,6 +21,8 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 ## Commands
 
 - `MAUI Deploy: Run`
+- `MAUI Deploy: Deploy Branch or PR`
+- `MAUI Deploy: Set Up Branch Deployment`
 - `MAUI Deploy: Deploy from Bin`
 - `MAUI Deploy: Debug`
 - `MAUI Deploy: Watch Run (Experimental)`
@@ -26,9 +30,126 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 - `MAUI Deploy: Run Tests`
 - `MAUI Deploy: Select Project`
 - `MAUI Deploy: Select Device`
+- `MAUI Deploy: Take Screenshot`
 - `MAUI Deploy: Toggle Configuration`
 - `MAUI Deploy: Ask Copilot to Fix Build Error`
 - `MAUI Deploy: Open Logs`
+
+## Branch And PR Deployment
+
+After installing or updating the extension, reload VS Code and open a **new
+integrated terminal** in your MAUI application repository:
+
+```sh
+mauideploy setup
+```
+
+The command selects a Git remote, tracked MAUI project, Debug/Release configuration,
+and device. Single project/device choices are automatic. These defaults are stored
+locally per repository under `~/.mauideploy/branch-deploy/`, separately from ordinary
+Run/Debug selections. No project files are changed. Run setup again to change them.
+The command palette's **MAUI Deploy: Set Up Branch Deployment** opens this terminal
+flow. The terminal command uses VS Code's bundled runtime; a global Node installation
+is not required. It is available in new VS Code terminals, not globally in other shells.
+
+Click **Deploy Branch** in the status bar, search for a branch, and press Enter.
+Remote and local branches are distinguished, and the last selection appears first.
+Local branches remain available when the remote is offline. You can also paste an
+HTTPS GitHub or GitHub Enterprise PR URL. Every ordinary button click requires a
+branch/PR selection; subsequent project, configuration, and device pickers are not
+part of deployment. Missing projects or unavailable devices stop with an error instead
+of silently selecting something else.
+
+MauiDeploy creates a sibling `<repository>-mauideploy` worktree with detached HEAD
+at the selected commit. It reuses that directory and ignored build output on later
+deployments. Submodules are initialized from that commit. The original branch,
+index, uncommitted files, `FETCH_HEAD`, and remote-tracking branches are preserved.
+Local branch deployments include committed changes only. PR deployments use the
+PR head, not GitHub's synthetic merge commit, and reject a PR that changes during fetch.
+Build terminals run in the worktree project's directory so its `global.json` and
+normal SDK discovery apply.
+
+Only one MauiDeploy operation may use a repository's deployment worktree at a time,
+including across VS Code windows. A dirty, repurposed, or unmanaged worktree is never
+reset, cleaned, or overwritten. A crash can leave `mauideploy.lock` in the repository's
+Git common directory; remove it only after confirming no deployment is still running.
+Stop an active MAUI debug session before deploying another branch from that window.
+
+Worktrees isolate normal source and `bin`/`obj` output, **not the device or app data**.
+Deploying the same application ID replaces the installed app. Custom absolute output
+paths and references outside the repository are not isolated by Git. Ignored local
+configuration and signing files are not copied from the development checkout.
+
+### One-Click PR Links
+
+GitHub CLI (`gh`) must be installed and authenticated for the repository's host;
+Git uses your existing remote credentials. PR links can deploy automatically only
+after setup explicitly authorizes this for the repository. The workspace must be
+trusted. Fork PRs and repositories without automatic authorization require a build
+confirmation because restore/build can execute code locally.
+
+Generate Markdown for a PR description or comment:
+
+```sh
+mauideploy pr-link https://github.com/owner/repository/pull/123
+```
+
+The link opens an HTTPS bridge that automatically invokes
+`vscode://FinstadProductions.maui-deploy/deploy-pr`. MauiDeploy finds the configured
+local repository and performs fetch, worktree preparation, build, install, and launch
+without further picks for an authorized same-repository PR. The browser or OS may
+still ask to open VS Code. A fallback link remains visible if automatic opening is
+blocked. If multiple clones are configured for the same remote, you choose the clone.
+
+**The default HTTPS bridge must be published before generated links work.** Its
+source is in `docs/deploy/` in the MauiDeploy repository. Enable GitHub Pages with
+**GitHub Actions** as the source, then manually run **Publish PR Deploy Link Page**.
+This does not happen during extension installation. To host the static directory
+elsewhere, pass `--bridge https://your-host/deploy/`. Add `--insiders` for VS Code Insiders.
+Repository and PR identifiers are stored in the URL fragment, not sent as query
+parameters to the bridge server; no tokens or local paths are included.
+
+Until the bridge is published, paste an ordinary PR URL into the branch picker.
+Branch/PR deployment currently targets local desktop VS Code with the normal MAUI
+toolchain and device prerequisites; remote extension hosts have not been verified.
+
+## Screenshots (macOS)
+
+Click the camera in the status bar or run **MAUI Deploy: Take Screenshot**.
+Choose an available phone or a running simulator/emulator. The current deployment
+target appears first, but the screenshot selection does not change your Run/Debug
+target. No build or active debugger is required.
+
+The screenshot opens in a VS Code image tab and is automatically copied as an
+image to the macOS clipboard. Screenshot bytes stay in memory: MAUI Deploy does
+not create an image file in the project or temporary directory. Closing the tab
+disposes its preview. The clipboard is not automatically cleared and may be
+retained or synchronized by clipboard managers or macOS Universal Clipboard.
+Capture and paste sensitive screens only where appropriate.
+
+- **iOS Simulator:** uses Xcode's `simctl` and requires a booted simulator.
+- **Android devices/emulators:** uses the Android SDK's `adb`; the device must
+	be connected and authorized.
+- **Physical iPhone:** uses the external `pymobiledevice3` helper and Apple's
+	native macOS tunnel. The phone must be paired, reachable, and configured for
+	development. Wi-Fi capture is verified on iPhone 15 Pro / iOS 26.6.1. Other
+	iOS/macOS combinations and USB capture with this helper still need hardware
+	verification.
+
+The first physical-iPhone capture asks permission to install the helper. MAUI
+Deploy uses Xcode's available `python3` to bootstrap `uv` 0.12.13, then installs
+managed Python 3.14 and `pymobiledevice3` 11.12.5 under its VS Code global storage
+directory. Internet access is required for setup. No global Python packages,
+project dependencies, administrator access, or app agent are required. Later
+captures reuse the verified installation. A cancelled or failed setup can be
+retried by taking another screenshot. Helper metadata and package caches are
+stored in this private directory, separate from the in-memory screenshot.
+
+The helper is downloaded separately, not bundled in the VSIX:
+[pymobiledevice3 source and GPL-3.0-or-later license](https://github.com/doronz88/pymobiledevice3),
+[uv source and licenses](https://github.com/astral-sh/uv).
+Screenshot capture/clipboard integration currently runs on a macOS extension
+host; Windows, Linux, and remote-host screenshot workflows are not supported.
 
 ## Android Build Performance
 
@@ -88,10 +209,12 @@ Set it to `false` to retain the project's analysis settings. Release and builds
 outside MAUI Deploy are unchanged. Keep compatibility checks enabled in CI because
 these warnings are deferred during local Debug builds.
 
-`mauideploy.ios.useDynamicRegistrar` defaults to `true`. Both Run and Debug use
+`mauideploy.ios.useDynamicRegistrar` defaults to `false`, retaining the project's
+registrar settings. Opt in by setting it to `true`: both Run and Debug then use
 `Registrar=dynamic` for physical iOS devices in Debug configuration, avoiding
 static registrar native compilation. This overrides any explicit project registrar
-setting. Release and simulator builds are unchanged.
+setting and may cause startup crashes with incompatible registrar artifacts.
+Release and simulator builds are unchanged.
 
 **Turn this setting off if the app crashes.** The next Run or Debug cleans and
 rebuilds using the project's registrar settings. Deploy from Bin cannot apply the
