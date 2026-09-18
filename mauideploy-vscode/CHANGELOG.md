@@ -2,6 +2,12 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 1.6.3 - 2026-09-18
+
+### Fixed
+- Show immediate, cancellable progress when opening a PR deploy link or starting branch deployment, including preparation before the device picker appears.
+- Refresh PR/branch and toolbar device lists automatically while open, preserve search and focus, and wait for newly connected devices instead of closing an empty picker.
+
 ## 1.6.2 - 2026-09-17
 
 ### Added

@@ -206,6 +206,110 @@ test('the registered URI handler preserves PR parameters through VS Code URI ser
     }
 });
 
+test('branch deployment shows progress before preparation and cleans up on completion, failure and cancellation', async () => {
+    const filename = path.resolve(__dirname, '../out/extension.js');
+    const localRequire = createRequire(filename);
+    for (const outcome of ['success', 'failure', 'notification cancellation', 'toolbar cancellation']) {
+        class CancellationTokenSource {
+            listeners = new Set();
+            token = {
+                isCancellationRequested: false,
+                onCancellationRequested: listener => {
+                    this.listeners.add(listener);
+                    return { dispose: () => this.listeners.delete(listener) };
+                }
+            };
+            cancel() {
+                this.token.isCancellationRequested = true;
+                for (const listener of this.listeners) { listener(); }
+            }
+            dispose() { this.listeners.clear(); }
+        }
+        const notificationCancellation = new CancellationTokenSource();
+        const reports = [];
+        const errors = [];
+        const events = [];
+        let progressVisible = false;
+        let deploymentToken;
+        let reportDeployment;
+        let terminalStops = 0;
+        let finishPreparation;
+        const preparation = new Promise((resolve, reject) => {
+            finishPreparation = () => {
+                if (outcome === 'failure') { reject(new Error('Preparation failed')); }
+                else { resolve(); }
+            };
+        });
+        const reference = parsePullRequestUrl('https://github.com/example/app/pull/42');
+        const sandbox = {
+            exports: {}, process,
+            require: name => {
+                if (name === 'vscode') {
+                    return {
+                        CancellationTokenSource, CancellationError: class extends Error {},
+                        ProgressLocation: { Notification: 15 }, debug: {},
+                        window: {
+                            showErrorMessage: async message => errors.push(message),
+                            withProgress: async (options, task) => {
+                                assert.equal(options.location, 15);
+                                assert.equal(options.cancellable, true);
+                                events.push('progress');
+                                progressVisible = true;
+                                try {
+                                    return await task({ report: update => reports.push(update) }, notificationCancellation.token);
+                                } finally {
+                                    progressVisible = false;
+                                }
+                            }
+                        }
+                    };
+                }
+                if (name === './branchDeploy') {
+                    return { deployBranch: async (context, token, report, project, request) => {
+                        assert.equal(request, reference);
+                        events.push('deployment');
+                        deploymentToken = token;
+                        reportDeployment = report;
+                        await preparation;
+                    } };
+                }
+                if (name === './deployer') { return { cancelBuildTerminals: () => terminalStops++ }; }
+                if (name.startsWith('./')) { return {}; }
+                return localRequire(name);
+            }
+        };
+        vm.runInNewContext(fs.readFileSync(filename, 'utf8') + `
+            ctx = {};
+            sbBranch = {};
+            updateStatusBar = () => {};
+            exports.run = cmdDeployBranch;
+            exports.stop = cmdStopOperation;
+            exports.isBusy = () => isBuilding;
+        `, sandbox, { filename });
+        const running = sandbox.exports.run(reference);
+        try {
+            assert.equal(progressVisible, true, outcome);
+            assert.deepEqual(events, ['progress', 'deployment']);
+            assert.ok(reports.length > 0);
+            reportDeployment('Device discovery in progress');
+            assert.equal(reports.at(-1).message, 'Device discovery in progress');
+            if (outcome === 'notification cancellation') { notificationCancellation.cancel(); }
+            if (outcome === 'toolbar cancellation') { sandbox.exports.stop(); }
+            const cancelled = outcome.endsWith('cancellation');
+            assert.equal(deploymentToken.isCancellationRequested, cancelled);
+            assert.equal(terminalStops, cancelled ? 1 : 0);
+            assert.equal(progressVisible, true);
+        } finally {
+            finishPreparation();
+            await running;
+        }
+        assert.equal(progressVisible, false);
+        assert.equal(notificationCancellation.listeners.size, 0);
+        assert.equal(sandbox.exports.isBusy(), false);
+        assert.equal(errors.length, outcome === 'failure' ? 1 : 0);
+    }
+});
+
 test('Microsoft redirect links retain private PR fragments for GitHub, GHE and both editors', () => {
     for (const repository of ['https://github.com/example/app', 'https://dips.ghe.com/dips/Arena.Mobile']) {
         for (const insiders of [false, true]) {
@@ -393,6 +497,7 @@ test('saved setup cannot redirect a deployment project outside its worktree', as
 function deploymentHarness() {
     const filename = path.resolve(__dirname, '../out/branchDeploy.js');
     const localRequire = createRequire(filename);
+    const cancellationListeners = new Set();
     const root = path.resolve('/application');
     const repository = { root, commonDirectory: path.join(root, '.git'), worktreePath: `${root}-mauideploy` };
     const profile = {
@@ -409,20 +514,40 @@ function deploymentHarness() {
         remoteUrl: profile.repositoryUrl, cancelPicker: false, remoteOffline: false,
         hasProfile: true, setupResult: 'success', setupCalls: [], folderPicks: 0,
         devicePicks: [], profileWrites: [], cancelDevice: false, abortDevice: false,
+        refreshTimers: new Map(), deviceScans: 0, holdDevicePicker: false,
         prerequisiteChecks: [], selectedDotnet: '/managed/dotnet/dotnet',
         projects: ['src/App.csproj', 'src/Other.csproj'], remotes: ['origin'], commands: new Map(), failures: [],
         platforms: [{ name: 'iOS', framework: 'net10.0-ios' }],
         workspaceFolders: [{ uri: { fsPath: root } }],
         token: { isCancellationRequested: false, onCancellationRequested: handler => {
-            fixture.cancel = () => { fixture.token.isCancellationRequested = true; handler(); };
-            return { dispose() {} };
+            cancellationListeners.add(handler);
+            return { dispose: () => cancellationListeners.delete(handler) };
         } }
     };
+    fixture.cancel = () => {
+        fixture.token.isCancellationRequested = true;
+        for (const listener of cancellationListeners) { listener(); }
+    };
+    fixture.refreshDeviceList = async () => {
+        assert.equal(fixture.refreshTimers.size, 1);
+        const [timer, refresh] = fixture.refreshTimers.entries().next().value;
+        fixture.refreshTimers.delete(timer);
+        await refresh();
+    };
     let setupModule;
+    let devicePickerModule;
+    let resolveDeviceListReady;
+    fixture.deviceListReady = new Promise(resolve => { resolveDeviceListReady = resolve; });
     const device = { ...profile.device, state: 'connected', display: profile.device.name };
     fixture.devices = [device];
     const sandbox = {
         exports: {}, process, AbortController,
+        setTimeout: refresh => {
+            const timer = {};
+            fixture.refreshTimers.set(timer, refresh);
+            return timer;
+        },
+        clearTimeout: timer => fixture.refreshTimers.delete(timer),
         require: name => {
             if (name === 'vscode') {
                 return {
@@ -442,14 +567,6 @@ function deploymentHarness() {
                         showInformationMessage: async () => {},
                         showErrorMessage: async message => fixture.failures.push(message),
                         showQuickPick: async (items, options, token) => {
-                            if (items.some(item => item.device)) {
-                                assert.equal(token, fixture.token);
-                                fixture.devicePicks.push(items.filter(item => item.device));
-                                if (fixture.cancelDevice) { return undefined; }
-                                if (fixture.abortDevice) { fixture.cancel(); }
-                                if (fixture.selectedDeviceId) { return items.find(item => item.device?.id === fixture.selectedDeviceId); }
-                                return items.find(item => item.device);
-                            }
                             fixture.setupCalls.push(items);
                             assert.equal(fixture.fetches.length, 0);
                             assert.equal(fixture.builds.length, 0);
@@ -469,19 +586,51 @@ function deploymentHarness() {
                         },
                         createTerminal: () => assert.fail('Setup must use native VS Code menus'),
                         createQuickPick: () => {
-                            fixture.pickerCount++;
                             const handlers = {};
-                            const picker = { value: '', selectedItems: [], dispose() {}, show() {} };
+                            let currentItems = [];
+                            let branchPicker = false;
+                            const picker = {
+                                value: '', activeItems: [], selectedItems: [], disposed: false, visible: false,
+                                dispose() { picker.disposed = true; picker.visible = false; },
+                                show() { picker.visible = true; },
+                                accept() { handlers.onDidAccept(); },
+                                hide() { handlers.onDidHide(); }
+                            };
                             for (const name of ['onDidHide', 'onDidChangeValue', 'onDidAccept']) {
                                 picker[name] = handler => { handlers[name] = handler; return { dispose() {} }; };
                             }
-                            Object.defineProperty(picker, 'items', { set: items => {
-                                queueMicrotask(() => {
-                                    if (fixture.cancelPicker) { handlers.onDidHide(); return; }
-                                    picker.selectedItems = [items.find(item => item.source)];
-                                    handlers.onDidAccept();
-                                });
-                            } });
+                            Object.defineProperty(picker, 'items', {
+                                get: () => currentItems,
+                                set: items => {
+                                    currentItems = items;
+                                    if (items.some(item => item.source)) {
+                                        if (!branchPicker) { fixture.pickerCount++; branchPicker = true; }
+                                        queueMicrotask(() => {
+                                            if (picker.disposed) { return; }
+                                            if (fixture.cancelPicker) { picker.hide(); return; }
+                                            picker.selectedItems = [items.find(item => item.source)];
+                                            picker.accept();
+                                        });
+                                        return;
+                                    }
+                                    fixture.devicePicker = picker;
+                                    const devices = items.filter(item => item.device);
+                                    fixture.devicePicks.push(devices);
+                                    picker.activeItems = devices.slice(0, 1);
+                                    picker.selectedItems = [];
+                                    resolveDeviceListReady();
+                                    queueMicrotask(() => {
+                                        if (picker.disposed || fixture.holdDevicePicker) { return; }
+                                        if (fixture.cancelDevice) { picker.hide(); return; }
+                                        if (fixture.abortDevice) { fixture.cancel(); return; }
+                                        let choice = devices[0];
+                                        if (fixture.selectedDeviceId) {
+                                            choice = devices.find(item => item.device.id === fixture.selectedDeviceId);
+                                        }
+                                        if (choice) { picker.selectedItems = [choice]; picker.accept(); }
+                                    });
+                                }
+                            });
                             return picker;
                         }
                     }
@@ -525,6 +674,15 @@ function deploymentHarness() {
                 }
                 return setupModule;
             }
+            if (name === './devicePicker') {
+                if (!devicePickerModule) {
+                    const pickerFilename = path.resolve(__dirname, '../out/devicePicker.js');
+                    const pickerSandbox = { ...sandbox, exports: {} };
+                    vm.runInNewContext(fs.readFileSync(pickerFilename, 'utf8'), pickerSandbox, { filename: pickerFilename });
+                    devicePickerModule = pickerSandbox.exports;
+                }
+                return devicePickerModule;
+            }
             if (name === './worktrees') {
                 return {
                     getGitRepository: async () => repository,
@@ -558,7 +716,11 @@ function deploymentHarness() {
                 return {
                     isMauiProject: () => true,
                     detectPlatforms: () => fixture.platforms,
-                    detectAllDevices: async platforms => fixture.devices.filter(device => platforms.some(platform => platform.name === device.platform)),
+                    detectAllDevices: async platforms => {
+                        fixture.deviceScans++;
+                        if (fixture.pendingDiscovery) { await fixture.pendingDiscovery; }
+                        return fixture.devices.filter(device => platforms.some(platform => platform.name === device.platform));
+                    },
                     bootSimulator: async () => assert.fail('A physical device must not be booted')
                 };
             }
@@ -568,13 +730,14 @@ function deploymentHarness() {
             return localRequire(name);
         }
     };
-    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), sandbox, { filename });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8') + '\nexports.pickDevice = pickDeploymentDevice;', sandbox, { filename });
     const context = {
         asAbsolutePath: relative => path.join('/extension', relative),
         subscriptions: [], environmentVariableCollection: { prepend() {}, replace() {} },
         globalState: { get: () => undefined, update: async (...args) => fixture.saves.push(args) }
     };
     fixture.run = request => sandbox.exports.deployBranch(context, fixture.token, () => {}, undefined, request);
+    fixture.pickDevice = () => sandbox.exports.pickDevice(fixture.platforms, validateProfile(profile), 'PR #42', fixture.token);
     fixture.registerSetup = () => sandbox.exports.registerBranchSetup(context, () => path.join(root, profile.projectPath));
     return fixture;
 }
@@ -675,9 +838,77 @@ test('first deployment has no device default and a disconnected last device does
     fixture.devices = [{ id: 'replacement', name: 'Other Phone', display: 'Other Phone', platform: 'iOS', type: 'physical' }];
     await fixture.run(fixture.reference);
     assert.equal(fixture.builds[1][2].id, 'replacement');
-    fixture.devices = [];
-    await assert.rejects(fixture.run(fixture.reference), /No available devices/);
     assert.equal(fixture.builds.length, 2);
+});
+
+test('an empty device picker stays open and discovers a newly connected iPhone without reopening', async () => {
+    const fixture = deploymentHarness();
+    const phone = fixture.devices[0];
+    fixture.devices = [];
+    fixture.holdDevicePicker = true;
+    const selecting = fixture.pickDevice();
+    await fixture.deviceListReady;
+    assert.equal(fixture.devicePicker.visible, true);
+    assert.equal(fixture.devicePicker.items.length, 0);
+    fixture.devices = [phone];
+    await fixture.refreshDeviceList();
+    const item = fixture.devicePicker.items.find(item => item.device?.id === phone.id);
+    assert.ok(item);
+    assert.equal(fixture.devicePicker.visible, true);
+    fixture.devicePicker.selectedItems = [item];
+    fixture.devicePicker.accept();
+    assert.equal((await selecting).id, phone.id);
+    assert.equal(fixture.devicePicker.disposed, true);
+    assert.equal(fixture.refreshTimers.size, 0);
+});
+
+test('device refresh preserves search and focus while removing disconnected devices from selection', async () => {
+    const fixture = deploymentHarness();
+    fixture.holdDevicePicker = true;
+    fixture.devices.push({ ...fixture.devices[0], id: 'other-phone', name: 'Other Phone' });
+    const selecting = fixture.pickDevice();
+    await fixture.deviceListReady;
+    const picker = fixture.devicePicker;
+    const previousItem = picker.items.find(item => item.device?.id === 'other-phone');
+    picker.value = 'Phone';
+    picker.activeItems = [previousItem];
+    fixture.devices = fixture.devices.map(device => ({ ...device }));
+    await fixture.refreshDeviceList();
+    assert.equal(picker.value, 'Phone');
+    assert.equal(picker.activeItems[0].device.id, 'other-phone');
+    assert.notEqual(picker.activeItems[0], previousItem);
+    fixture.devices = fixture.devices.filter(device => device.id !== 'other-phone');
+    await fixture.refreshDeviceList();
+    assert.ok(!picker.items.some(item => item.device?.id === 'other-phone'));
+    picker.selectedItems = [previousItem];
+    picker.accept();
+    assert.equal(picker.disposed, false);
+    picker.selectedItems = [picker.items.find(item => item.device)];
+    picker.accept();
+    assert.equal((await selecting).id, 'configured');
+    assert.equal(fixture.refreshTimers.size, 0);
+});
+
+test('closing or cancelling the device picker stops refreshes and ignores an in-flight discovery result', async () => {
+    for (const cancel of [false, true]) {
+        const fixture = deploymentHarness();
+        fixture.holdDevicePicker = true;
+        const selecting = fixture.pickDevice();
+        await fixture.deviceListReady;
+        let completeDiscovery;
+        fixture.pendingDiscovery = new Promise(resolve => { completeDiscovery = resolve; });
+        const refreshing = fixture.refreshDeviceList();
+        assert.equal(fixture.deviceScans, 2);
+        assert.equal(fixture.refreshTimers.size, 0);
+        if (cancel) { fixture.cancel(); }
+        else { fixture.devicePicker.hide(); }
+        await assert.rejects(selecting);
+        completeDiscovery();
+        await refreshing;
+        assert.equal(fixture.devicePicker.disposed, true);
+        assert.equal(fixture.devicePicks.length, 1);
+        assert.equal(fixture.refreshTimers.size, 0);
+    }
 });
 
 test('first PR click uses native setup menus and selects the device once before resuming the same PR', async () => {

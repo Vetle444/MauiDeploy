@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { buildAndDeploy, BuildResult } from './deployer';
-import { detectPlatforms, detectAllDevices, bootSimulator, Device, Platform } from './devices';
+import { detectPlatforms, bootSimulator, Device, Platform } from './devices';
+import { DevicePickItem, showDevicePicker } from './devicePicker';
 import { BranchDeployProfile, readBranchProfile, readBranchProfiles, resolveDeploymentProject, saveBranchProfile } from './branchProfiles';
 import { configureBranchDeploy } from './branchSetup';
 import { BranchPrerequisites } from './prerequisiteSetup';
@@ -137,31 +138,33 @@ async function pickDeploymentDevice(
 ): Promise<Device> {
     if (token.isCancellationRequested) { throw new vscode.CancellationError(); }
     if (platforms.length === 0) { throw new Error('This project does not target iOS or Android in the selected branch.'); }
-    const devices = (await detectAllDevices(platforms)).filter(device => device.available !== false);
-    if (token.isCancellationRequested) { throw new vscode.CancellationError(); }
-    if (devices.length === 0) { throw new Error('No available devices for this project. Connect a device or create an iOS simulator and try again.'); }
-    const previous = devices.find(device => device.id === profile.device?.id &&
-        device.platform === profile.device.platform && device.type === profile.device.type);
-    const itemForDevice = (device: Device) => ({
-        label: `$(${device.type === 'simulator' ? 'vm' : 'device-mobile'}) ${device.display}`,
-        description: device.state, device
-    });
-    const items: (vscode.QuickPickItem & { device?: Device })[] = [];
-    if (previous) {
-        items.push({ label: 'Last Used', kind: vscode.QuickPickItemKind.Separator }, itemForDevice(previous));
-    }
-    for (const platform of platforms) {
-        const group = devices.filter(device => device.platform === platform.name && device !== previous);
-        if (group.length > 0) {
-            items.push({ label: platform.name, kind: vscode.QuickPickItemKind.Separator }, ...group.map(itemForDevice));
+    const buildItems = (devices: Device[]): DevicePickItem[] => {
+        const previous = devices.find(device => device.id === profile.device?.id &&
+            device.platform === profile.device.platform && device.type === profile.device.type);
+        const itemForDevice = (device: Device) => ({
+            label: `$(${device.type === 'simulator' ? 'vm' : 'device-mobile'}) ${device.display}`,
+            description: device.state, device
+        });
+        const items: DevicePickItem[] = [];
+        if (previous) {
+            items.push({ label: 'Last Used', kind: vscode.QuickPickItemKind.Separator }, itemForDevice(previous));
         }
-    }
-    const choice = await vscode.window.showQuickPick(items, {
-        title: `Deploy ${label}: Device`, placeHolder: `${profile.projectPath} / ${profile.configuration}`,
-        matchOnDescription: true, ignoreFocusOut: true
-    }, token);
-    if (!choice?.device || token.isCancellationRequested) { throw new vscode.CancellationError(); }
-    return choice.device;
+        for (const platform of platforms) {
+            const group = devices.filter(device => device.platform === platform.name && device !== previous);
+            if (group.length > 0) {
+                items.push({ label: platform.name, kind: vscode.QuickPickItemKind.Separator }, ...group.map(itemForDevice));
+            }
+        }
+        return items;
+    };
+    const picker = vscode.window.createQuickPick<DevicePickItem>();
+    picker.title = `Deploy ${label}: Device`;
+    picker.placeholder = `${profile.projectPath} / ${profile.configuration}`;
+    picker.matchOnDescription = true;
+    picker.ignoreFocusOut = true;
+    const device = await showDevicePicker(picker, platforms, buildItems, token);
+    if (!device || token.isCancellationRequested) { throw new vscode.CancellationError(); }
+    return device;
 }
 
 async function selectDeploymentProfile(

@@ -9,6 +9,7 @@ import {
     Platform, Device, RecentDevice, isMauiProject,
     findIosAppBundle, findAndroidApk, getAndroidPackageId
 } from './devices';
+import { DevicePickItem, showDevicePicker } from './devicePicker';
 import { findWorkspaceMauiProjects, findWorkspaceCsprojs, findCsprojsInDir } from './projects';
 import { registerScreenshotCommand } from './screenshotCommand';
 import { deployBranch, registerBranchSetup } from './branchDeploy';
@@ -1012,10 +1013,27 @@ async function cmdDeployBranch(pullRequest?: PullRequestReference) {
     showStopButton(sbBranch, 'Selecting branch');
     const reporter = createStatusBarReporter(sbBranch, 'Deploying branch');
     try {
-        await deployBranch(ctx, operation.cancellation.token, (message, elapsedMs, percent) => {
-            if (elapsedMs !== undefined && percent !== undefined) { reporter(elapsedMs, percent); }
-            else { showStopButton(sbBranch, message); }
-        }, state.projectPath, pullRequest);
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: pullRequest ? `MAUI Deploy: PR #${pullRequest.number}` : 'MAUI Deploy: Branch',
+            cancellable: true
+        }, async (progress, token) => {
+            const cancellation = token.onCancellationRequested(() => {
+                if (activeOperation === operation) { cmdStopOperation(); }
+            });
+            try {
+                if (token.isCancellationRequested) { cmdStopOperation(); }
+                if (operation.cancellation.token.isCancellationRequested) { return; }
+                progress.report({ message: 'Preparing deployment...' });
+                await deployBranch(ctx, operation.cancellation.token, (message, elapsedMs, percent) => {
+                    progress.report({ message });
+                    if (elapsedMs !== undefined && percent !== undefined) { reporter(elapsedMs, percent); }
+                    else { showStopButton(sbBranch, message); }
+                }, state.projectPath, pullRequest);
+            } finally {
+                cancellation.dispose();
+            }
+        });
     } catch (error) {
         if (!operation.cancellation.token.isCancellationRequested && !(error instanceof vscode.CancellationError)) {
             void vscode.window.showErrorMessage(`MAUI Deploy: ${error instanceof Error ? error.message : String(error)}`);
@@ -1939,10 +1957,8 @@ async function cmdPickDevice(): Promise<boolean> {
         return false;
     }
 
-    interface Item extends vscode.QuickPickItem { device?: Device; }
-
-    const buildDeviceItems = (devices: Device[]): Item[] => {
-        const items: Item[] = [];
+    const buildDeviceItems = (devices: Device[]): DevicePickItem[] => {
+        const items: DevicePickItem[] = [];
         const recentIds = new Set<string>();
         const recentAvailable = state.recentDevices
             .filter(r => devices.some(d => d.id === r.id))
@@ -2008,51 +2024,24 @@ async function cmdPickDevice(): Promise<boolean> {
     };
 
     // Show picker immediately with cached devices, then refresh in background
-    const qp = vscode.window.createQuickPick<Item>();
-    qp.title = 'Select Target Device';
-    qp.placeholder = 'Type to search…';
-    qp.matchOnDescription = true;
-    qp.matchOnDetail = true;
+    const picker = vscode.window.createQuickPick<DevicePickItem>();
+    picker.title = 'Select Target Device';
+    picker.placeholder = 'Type to search…';
+    picker.matchOnDescription = true;
+    picker.matchOnDetail = true;
 
     // Populate with cached devices instantly
     if (cachedDevices.length > 0) {
-        qp.items = buildDeviceItems(cachedDevices);
+        picker.items = buildDeviceItems(cachedDevices.filter(device => device.available !== false));
     }
 
-    // Start async refresh
-    qp.busy = true;
-    detectAllDevices(platforms).then(freshDevices => {
+    const device = await showDevicePicker(picker, platforms, freshDevices => {
         cachedDevices = freshDevices;
-        qp.items = buildDeviceItems(freshDevices);
-        qp.busy = false;
-
-        if (freshDevices.length === 0 && cachedDevices.length === 0) {
-            const hint = platforms.some(p => p.name === 'iOS')
-                ? 'Start a simulator or connect an Android device.'
-                : 'Connect an Android device or start an emulator.';
-            qp.placeholder = `No devices found. ${hint}`;
-        }
-    }).catch(() => {
-        qp.busy = false;
+        return buildDeviceItems(freshDevices);
     });
-
-    return new Promise<boolean>(resolve => {
-        qp.onDidAccept(() => {
-            const selected = qp.selectedItems[0];
-            qp.dispose();
-            if (selected?.device) {
-                setDevice(selected.device);
-                resolve(true);
-            } else {
-                resolve(false);
-            }
-        });
-        qp.onDidHide(() => {
-            qp.dispose();
-            resolve(false);
-        });
-        qp.show();
-    });
+    if (!device) { return false; }
+    setDevice(device);
+    return true;
 }
 
 function deviceVisuals(d: Device): { icon: string; stateLabel: string } {
