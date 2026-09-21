@@ -53,13 +53,28 @@ test('failed or invalid captures never become screenshots', async () => {
     await assert.rejects(captureScreenshot(device, signal, '/managed/python'), /disconnected/);
 });
 
+test('wired iPhone screenshots allow automatic USB tunnel fallback while Wi-Fi retains native discovery', async () => {
+    const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(24, 255)]);
+    const signal = new AbortController().signal;
+    result = png;
+    for (const transport of ['USB', 'Wi-Fi']) {
+        const device = { id: 'selected-phone', platform: 'iOS', type: 'physical', transport };
+        assert.equal(await captureScreenshot(device, signal, '/managed/python', '/managed'), png);
+        assert.equal(invocation.command, '/managed/python');
+        assert.equal(invocation.args.includes('--native'), transport === 'Wi-Fi');
+        assert.deepEqual(invocation.args.slice(-2), ['--udid', 'selected-phone']);
+        assert.equal(invocation.options.signal, signal);
+        assert.equal(invocation.options.cwd, '/managed');
+    }
+});
+
 test('screenshot discovery excludes unreachable phones and stopped simulators, but retains Wi-Fi devices', async () => {
     result = async (command, args) => {
         if (args.includes('devicectl')) {
             assert.ok(args.includes('/dev/stdout'));
             return { stdout: JSON.stringify({ result: { devices: [
                 { deviceProperties: { name: 'wifi' }, hardwareProperties: { udid: 'wifi-id' }, connectionProperties: { pairingState: 'paired', tunnelState: 'disconnected', transportType: 'localNetwork' } },
-                { deviceProperties: { name: 'offline' }, hardwareProperties: { udid: 'offline-id' }, connectionProperties: { pairingState: 'paired', tunnelState: 'unavailable' } },
+                { deviceProperties: { name: 'offline' }, hardwareProperties: { udid: 'offline-id' }, connectionProperties: { pairingState: 'paired', tunnelState: 'unavailable', transportType: 'wired' } },
                 { deviceProperties: { name: 'unpaired' }, hardwareProperties: { udid: 'unpaired-id' }, connectionProperties: { pairingState: 'unpaired' } },
             ] } }) };
         }
@@ -75,10 +90,14 @@ test('screenshot discovery excludes unreachable phones and stopped simulators, b
     const devices = await devicesModule.detectScreenshotDevices();
     assert.deepEqual(devices.map(device => device.id), ['wifi-id', 'running-id', 'android-id']);
     assert.equal(devices[0].transport, 'Wi-Fi');
+    const phones = await devicesModule.detectIosPhysicalDevices();
+    assert.deepEqual(phones.map(device => device.id), ['wifi-id', 'offline-id']);
+    assert.equal(phones[1].transport, 'USB');
+    assert.equal(phones[1].available, false);
 });
 
 const vscodeMock = {
-    commands: {}, window: {}, workspace: { isTrusted: true, fs: {} },
+    commands: {}, window: {}, workspace: { isTrusted: true, fs: {}, getConfiguration: () => ({ get: (key, fallback) => fallback }) },
     ProgressLocation: { Window: 10, Notification: 15 }, ViewColumn: { Active: -1 }, QuickPickItemKind: { Separator: -1 },
     Uri: { file: fsPath => ({ fsPath }) },
     CancellationTokenSource: class {
@@ -293,6 +312,7 @@ test('video command records a USB iPhone without Python, saves MP4 and retains p
         assert.ok(progressMessages.includes('Finding available devices...'));
         return [recordingDevice, deploymentDevice];
     };
+    context.mock.method(devicesModule, 'detectIosPhysicalDevices', async () => [recordingDevice]);
     const commands = new Map();
     const states = [];
     const feedback = [];
@@ -372,6 +392,8 @@ test('video command records a USB iPhone without Python, saves MP4 and retains p
         options.onStage('buildingHelper');
         options.onStage('waitingForUsb');
         assert.ok(!states.includes('recording') || declineSave);
+        options.onStage('choosingUsbScreen');
+        assert.equal(await options.selectUsbScreen([{ id: 'native-screen-uuid', name: 'USB iPhone' }], options.signal), 'native-screen-uuid');
         options.onStage('waitingForPermission');
         options.onStage('starting');
         options.onStarted();
@@ -392,7 +414,7 @@ test('video command records a USB iPhone without Python, saves MP4 and retains p
     assert.equal(saves, 1);
     assert.equal(revealed.length, 1);
     assert.deepEqual(states, ['findingDevices', 'choosingDevice', 'preparing', 'checkingHelper', 'buildingHelper',
-        'waitingForUsb', 'waitingForPermission', 'starting', 'recording', 'finalizing', 'previewing', 'saving', 'idle']);
+        'waitingForUsb', 'choosingUsbScreen', 'waitingForPermission', 'starting', 'recording', 'finalizing', 'previewing', 'saving', 'idle']);
     assert.ok(progressMessages.some(message => message.includes('Waiting for USB iPhone')));
     assert.ok(progressMessages.some(message => message.includes('Waiting for camera permission')));
     assert.ok(progressMessages.includes('Recording Record: 01:05 / 03:00'));
@@ -542,4 +564,305 @@ test('recording cancellation closes the device picker, suppresses late discovery
     }
     assert.equal(picks, 3);
     assert.equal(captures, 2);
+});
+
+test('live preview reports USB and live states, keeps deployment selection, and releases startup progress when live', { skip: process.platform !== 'darwin' }, async context => {
+    const live = require('../out/livePreview');
+    const commands = new Map();
+    const states = [];
+    const notifications = [];
+    const device = { id: 'preview', name: 'Preview', platform: 'iOS', type: 'physical', transport: 'Wi-Fi' };
+    const deployment = { id: 'deployment', name: 'Deployment', platform: 'Android', type: 'physical' };
+    const extensionContext = { subscriptions: [], globalStorageUri: { fsPath: '/private/storage' }, extensionPath: '/extension' };
+    context.after(() => { for (const subscription of extensionContext.subscriptions) { subscription.dispose(); } });
+    let ready;
+    const notificationClosed = new Promise(resolve => { ready = resolve; });
+    let signal;
+    context.mock.method(vscodeMock.commands, 'registerCommand', (name, callback) => { commands.set(name, callback); return { dispose() {} }; });
+    context.mock.method(vscodeMock.window, 'createOutputChannel', () => ({ appendLine() {}, show() {}, dispose() {} }));
+    context.mock.method(vscodeMock.window, 'showErrorMessage', message => assert.fail(message));
+    context.mock.method(vscodeMock.window, 'setStatusBarMessage', () => {});
+    context.mock.method(vscodeMock.window, 'withProgress', async (options, callback) => {
+        assert.equal(options.title, 'MAUI Deploy: Live Device Preview');
+        notifications.push(options);
+        const token = new vscodeMock.CancellationTokenSource();
+        try { return await callback({ report() {} }, token.token); }
+        finally { token.dispose(); ready(); }
+    });
+    context.mock.method(devicesModule, 'detectScreenshotDevices', async () => [device, deployment]);
+    context.mock.method(vscodeMock.window, 'showQuickPick', async (items, options) => {
+        if (options.title === 'USB Screen - Preview') {
+            assert.equal(options.ignoreFocusOut, true);
+            assert.ok(items.every(item => item.screenId && !item.device));
+            return items.find(item => item.screenId === 'selected-native-screen');
+        }
+        assert.equal(options.title, 'Live Device Preview');
+        assert.equal(items.find(item => item.device).device, deployment);
+        assert.match(items.find(item => item.device === device).description, /USB required/);
+        return items.find(item => item.device === device);
+    });
+    context.mock.method(live, 'openLivePreview', async (chosen, options) => {
+        assert.equal(chosen, device);
+        assert.equal(options.storage, '/private/storage/recordings');
+        signal = options.signal;
+        options.onState('waitingForUsb');
+        options.onState('choosingUsbScreen');
+        assert.equal(await options.selectUsbScreen([
+            { id: 'different-screen', name: 'iPhone' }, { id: 'selected-native-screen', name: 'iPhone' },
+        ], signal), 'selected-native-screen');
+        options.onState('live');
+        options.onState('paused');
+        await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        options.onState('stopping');
+    });
+    registerScreenshotCommand(extensionContext, () => deployment.id, () => {}, () => {}, state => states.push(state));
+    const operation = commands.get('mauideploy.livePreview')();
+    await notificationClosed;
+    assert.equal(signal.aborted, false);
+    assert.deepEqual(states, ['findingDevices', 'choosingDevice', 'waitingForUsb', 'choosingUsbScreen', 'live', 'paused']);
+    await commands.get('mauideploy.livePreview')();
+    assert.equal(notifications.length, 1);
+    await commands.get('mauideploy.stopLivePreview')();
+    await operation;
+    assert.equal(signal.aborted, true);
+    assert.deepEqual(states.slice(-2), ['stopping', 'idle']);
+    assert.equal(deployment.id, 'deployment');
+});
+
+test('preview window actions reuse screenshot clipboard and video save flows without another device picker or closing live preview', { skip: process.platform !== 'darwin' }, async context => {
+    const live = require('../out/livePreview');
+    const screenshots = require('../out/screenshots');
+    const commands = new Map();
+    const device = { id: 'phone', name: 'Phone', platform: 'iOS', type: 'physical' };
+    const extensionContext = { subscriptions: [], globalStorageUri: { fsPath: '/private/storage' }, extensionPath: '/extension' };
+    const panels = [];
+    const busy = [];
+    const image = Buffer.from('synthetic PNG payload');
+    let picks = 0;
+    let copies = 0;
+    let saves = 0;
+    let disposed = 0;
+    let actionsDone;
+    const ready = new Promise(resolve => { actionsDone = resolve; });
+    const video = { path: '/private/preview-record/recording.mp4', dispose: async () => { disposed++; } };
+    context.mock.method(vscodeMock.commands, 'registerCommand', (name, callback) => { commands.set(name, callback); return { dispose() {} }; });
+    context.mock.method(vscodeMock.window, 'createOutputChannel', () => ({ appendLine() {}, show() {}, dispose() {} }));
+    context.mock.method(vscodeMock.window, 'withProgress', async (options, callback) => {
+        const token = new vscodeMock.CancellationTokenSource();
+        try { return await callback({ report() {} }, token.token); } finally { token.dispose(); }
+    });
+    context.mock.method(vscodeMock.window, 'setStatusBarMessage', () => {});
+    context.mock.method(vscodeMock.window, 'showErrorMessage', message => assert.fail(message));
+    context.mock.method(vscodeMock.window, 'showQuickPick', async items => { picks++; return items.find(item => item.device); });
+    context.mock.method(devicesModule, 'detectScreenshotDevices', async () => [device]);
+    context.mock.method(vscodeMock.window, 'createWebviewPanel', (type, title, column, options) => {
+        let onDispose;
+        const panel = { type, options, active: true, webview: {
+            html: '', cspSource: 'https://preview', asWebviewUri: () => ({ toString: () => 'https://preview/recording.mp4' }),
+        }, reveal() {}, onDidDispose(callback) { onDispose = callback; }, dispose() { onDispose?.(); } };
+        panels.push(panel);
+        return panel;
+    });
+    context.mock.method(screenshots, 'captureScreenshot', async () => assert.fail('Use the displayed preview frame, not a separate device capture.'));
+    context.mock.method(screenshots, 'copyScreenshot', async captured => { assert.equal(captured, image); copies++; });
+    context.mock.method(vscodeMock.window, 'showSaveDialog', async () => ({ scheme: 'file', fsPath: '/saved.mp4' }));
+    context.mock.method(vscodeMock.workspace.fs, 'copy', async source => { assert.equal(source.fsPath, video.path); saves++; });
+    context.mock.method(vscodeMock.commands, 'executeCommand', async (name, destination) => {
+        assert.equal(name, 'revealFileInOS'); assert.equal(destination.fsPath, '/saved.mp4');
+    });
+    context.mock.method(live, 'openLivePreview', async (chosen, options) => {
+        options.onState('live');
+        await options.onScreenshot(image, options.signal);
+        options.onState('recording');
+        options.onState('finalizingRecording');
+        await options.onRecordingReady(video);
+        options.onState('live');
+        assert.equal(options.signal.aborted, false);
+        actionsDone();
+        await new Promise(resolve => options.signal.addEventListener('abort', resolve, { once: true }));
+    });
+    registerScreenshotCommand(extensionContext, () => device.id, value => busy.push(value));
+    const operation = commands.get('mauideploy.livePreview')();
+    await ready;
+    assert.equal(picks, 1);
+    assert.equal(copies, 1);
+    assert.equal(saves, 1);
+    assert.deepEqual(busy, [true, false]);
+    assert.deepEqual(panels.map(panel => panel.type), ['mauideploy.screenshot', 'mauideploy.recording']);
+    assert.ok(panels[0].webview.html.includes('data:image/png;base64,'));
+    assert.equal(disposed, 0);
+    await commands.get('mauideploy.stopLivePreview')();
+    await operation;
+    assert.equal(disposed, 0);
+    for (const subscription of extensionContext.subscriptions) { subscription.dispose(); }
+    assert.equal(disposed, 1);
+});
+
+test('USB screen auto-selection skips confirmation only for the selected sole wired iPhone', { skip: process.platform !== 'darwin' }, async context => {
+    const live = require('../out/livePreview');
+    const commands = new Map();
+    const phone = { id: 'PHONE-ID', name: 'Phone', platform: 'iOS', type: 'physical', transport: 'Wi-Fi' };
+    const wiredPhone = { ...phone, id: 'phoneid', transport: 'USB' };
+    const otherPhone = { ...wiredPhone, id: 'other-id' };
+    const screen = { id: 'native-screen-uuid', name: 'iPhone' };
+    const otherScreen = { id: 'other-screen-uuid', name: 'iPhone' };
+    const extensionContext = { subscriptions: [], globalStorageUri: { fsPath: '/private/storage' }, extensionPath: '/extension' };
+    context.after(() => { for (const subscription of extensionContext.subscriptions) { subscription.dispose(); } });
+    let scenario;
+    let discoveries;
+    let screenPicks;
+    let result;
+    let selection;
+    context.mock.method(vscodeMock.commands, 'registerCommand', (name, callback) => { commands.set(name, callback); return { dispose() {} }; });
+    context.mock.method(vscodeMock.window, 'createOutputChannel', () => ({ appendLine() {}, show() {}, dispose() {} }));
+    context.mock.method(vscodeMock.window, 'setStatusBarMessage', () => {});
+    context.mock.method(vscodeMock.window, 'showErrorMessage', message => assert.fail(message));
+    context.mock.method(vscodeMock.window, 'withProgress', async (options, callback) => {
+        const token = new vscodeMock.CancellationTokenSource();
+        try { return await callback({ report() {} }, token.token); } finally { token.dispose(); }
+    });
+    context.mock.method(devicesModule, 'detectScreenshotDevices', async () => [phone]);
+    context.mock.method(devicesModule, 'detectIosPhysicalDevices', async () => {
+        discoveries++;
+        if (scenario === 'cancelled') { selection.abort(); }
+        if (scenario === 'different-phone') { return [phone, otherPhone]; }
+        if (scenario === 'two-phones') { return [wiredPhone, otherPhone]; }
+        if (scenario === 'unavailable-phone') { return [wiredPhone, { ...otherPhone, available: false }]; }
+        if (scenario === 'no-usb') { return [phone]; }
+        return [wiredPhone, { id: 'android', platform: 'Android', type: 'physical', transport: 'USB' }];
+    });
+    context.mock.method(vscodeMock.window, 'showQuickPick', async (items, options) => {
+        if (options.title === 'Live Device Preview') { return items.find(item => item.device); }
+        assert.equal(options.title, 'USB Screen - Phone');
+        assert.equal(options.ignoreFocusOut, true);
+        screenPicks++;
+        return items.find(item => item.screenId === screen.id);
+    });
+    context.mock.method(live, 'openLivePreview', async (device, options) => {
+        assert.equal(device, phone);
+        selection = new AbortController();
+        const sources = scenario === 'two-screens' ? [screen, otherScreen] : [screen];
+        if (scenario === 'cancelled') {
+            await assert.rejects(options.selectUsbScreen(sources, selection.signal), { name: 'AbortError' });
+        } else { result = await options.selectUsbScreen(sources, selection.signal); }
+    });
+    registerScreenshotCommand(extensionContext, () => phone.id, () => {});
+    for (scenario of ['single-phone', 'different-phone', 'two-phones', 'unavailable-phone', 'no-usb', 'two-screens', 'cancelled']) {
+        discoveries = 0;
+        screenPicks = 0;
+        result = undefined;
+        await commands.get('mauideploy.livePreview')();
+        assert.equal(discoveries, scenario === 'two-screens' ? 0 : 1);
+        assert.equal(screenPicks, ['single-phone', 'cancelled'].includes(scenario) ? 0 : 1);
+        assert.equal(result, scenario === 'cancelled' ? undefined : screen.id);
+    }
+});
+
+test('recording replaces live preview only after consent, and extension disposal stops remaining previews', { skip: process.platform !== 'darwin' }, async context => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mauideploy-preview-handoff-'));
+    context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const live = require('../out/livePreview');
+    const recordings = require('../out/recordings');
+    const commands = new Map();
+    const device = { id: 'phone', name: 'Phone', platform: 'iOS', type: 'physical' };
+    const extensionContext = { subscriptions: [], globalStorageUri: { fsPath: directory }, extensionPath: directory };
+    let consent = false;
+    let recordingCount = 0;
+    let previewEnded = false;
+    let previewSignal;
+    let reportReady;
+    context.mock.method(vscodeMock.commands, 'registerCommand', (name, callback) => { commands.set(name, callback); return { dispose() {} }; });
+    context.mock.method(vscodeMock.window, 'createOutputChannel', () => ({ appendLine() {}, show() {}, dispose() {} }));
+    context.mock.method(vscodeMock.window, 'withProgress', async (options, callback) => {
+        const token = new vscodeMock.CancellationTokenSource();
+        try { return await callback({ report() {} }, token.token); } finally { token.dispose(); }
+    });
+    context.mock.method(vscodeMock.window, 'setStatusBarMessage', () => {});
+    context.mock.method(vscodeMock.window, 'showErrorMessage', message => assert.fail(message));
+    vscodeMock.window.showInformationMessage = async (message, action) => {
+        assert.match(message, /Close Live Device Preview/);
+        assert.equal(action, 'Stop Preview and Record');
+        return consent ? action : undefined;
+    };
+    context.mock.method(devicesModule, 'detectScreenshotDevices', async () => [device]);
+    context.mock.method(vscodeMock.window, 'showQuickPick', async items => items.find(item => item.device));
+    context.mock.method(live, 'openLivePreview', async (chosen, options) => {
+        assert.equal(chosen, device);
+        previewSignal = options.signal;
+        options.onState('live');
+        reportReady();
+        await new Promise(resolve => previewSignal.addEventListener('abort', resolve, { once: true }));
+        previewEnded = true;
+    });
+    context.mock.method(recordings, 'captureVideo', async () => {
+        assert.equal(previewSignal.aborted, true);
+        assert.equal(previewEnded, true);
+        recordingCount++;
+        return undefined;
+    });
+    registerScreenshotCommand(extensionContext, () => device.id, () => {});
+    let ready = new Promise(resolve => { reportReady = resolve; });
+    const first = commands.get('mauideploy.livePreview')();
+    await ready;
+    await commands.get('mauideploy.recordVideo')();
+    assert.equal(previewSignal.aborted, false);
+    assert.equal(recordingCount, 0);
+    consent = true;
+    await commands.get('mauideploy.recordVideo')();
+    await first;
+    assert.equal(recordingCount, 1);
+    ready = new Promise(resolve => { reportReady = resolve; });
+    const second = commands.get('mauideploy.livePreview')();
+    await ready;
+    for (const subscription of extensionContext.subscriptions) { subscription.dispose(); }
+    await second;
+    assert.equal(previewSignal.aborted, true);
+});
+
+test('Android preview offers scrcpy install or upgrade with explicit consent and ignores a cancelled prompt', { skip: process.platform !== 'darwin' }, async context => {
+    const live = require('../out/livePreview');
+    const commands = new Map();
+    const states = [];
+    const device = { id: 'android', name: 'Android', platform: 'Android', type: 'physical' };
+    const extensionContext = { subscriptions: [], globalStorageUri: { fsPath: '/private/storage' }, extensionPath: '/extension' };
+    context.after(() => { for (const subscription of extensionContext.subscriptions) { subscription.dispose(); } });
+    let scenario;
+    let consent;
+    let liveCount = 0;
+    context.mock.method(vscodeMock.commands, 'registerCommand', (name, callback) => { commands.set(name, callback); return { dispose() {} }; });
+    context.mock.method(vscodeMock.window, 'createOutputChannel', () => ({ appendLine() {}, show() {}, dispose() {} }));
+    context.mock.method(vscodeMock.window, 'withProgress', async (options, callback) => {
+        const token = new vscodeMock.CancellationTokenSource();
+        try { return await callback({ report() {} }, token.token); } finally { token.dispose(); }
+    });
+    context.mock.method(vscodeMock.window, 'setStatusBarMessage', () => {});
+    context.mock.method(vscodeMock.window, 'showErrorMessage', message => assert.fail(message));
+    context.mock.method(vscodeMock.window, 'showInformationMessage', async (message, options, label) => {
+        assert.match(message, /scrcpy 3 or newer/);
+        assert.equal(options.modal, true);
+        assert.match(options.detail, new RegExp(`brew ${scenario === 'upgrade' ? 'upgrade' : 'install'} scrcpy`));
+        assert.equal(label, scenario === 'upgrade' ? 'Upgrade and Continue' : 'Install and Continue');
+        if (scenario === 'cancel') { void commands.get('mauideploy.stopLivePreview')(); }
+        return scenario === 'decline' ? undefined : label;
+    });
+    context.mock.method(devicesModule, 'detectScreenshotDevices', async () => [device]);
+    context.mock.method(vscodeMock.window, 'showQuickPick', async items => items.find(item => item.device));
+    context.mock.method(live, 'openLivePreview', async (chosen, options) => {
+        assert.equal(chosen, device);
+        options.onState('waitingForScrcpyInstall');
+        consent = await options.confirmScrcpyInstall(scenario === 'upgrade' ? 'upgrade' : 'install');
+        if (!consent) { return; }
+        options.onState('installingScrcpy');
+        liveCount++;
+        options.onState('live');
+    });
+    registerScreenshotCommand(extensionContext, () => device.id, () => {}, () => {}, state => states.push(state));
+    for (scenario of ['install', 'upgrade', 'decline', 'cancel']) {
+        consent = undefined;
+        await commands.get('mauideploy.livePreview')();
+        assert.equal(consent, scenario === 'cancel' ? undefined : scenario !== 'decline');
+        assert.equal(states.at(-1), 'idle');
+    }
+    assert.equal(liveCount, 2);
+    assert.equal(states.filter(state => state === 'installingScrcpy').length, 2);
 });

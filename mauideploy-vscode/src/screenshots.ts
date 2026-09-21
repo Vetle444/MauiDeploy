@@ -17,7 +17,9 @@ export async function captureScreenshot(device: Device, signal: AbortSignal, pyt
     } else {
         if (!python) { throw new Error('The iPhone screenshot helper is not installed.'); }
         command = python;
-        args = ['-m', 'pymobiledevice3', 'developer', 'dvt', 'screenshot', '/dev/stdout', '--native', '--udid', device.id];
+        args = ['-m', 'pymobiledevice3', 'developer', 'dvt', 'screenshot', '/dev/stdout'];
+        if (device.transport !== 'USB') { args.push('--native'); }
+        args.push('--udid', device.id);
     }
 
     const { stdout } = await execFileAsync(command, args, {

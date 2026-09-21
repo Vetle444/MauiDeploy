@@ -12,6 +12,7 @@ import {
 import { DevicePickItem, showDevicePicker } from './devicePicker';
 import { findWorkspaceMauiProjects, findWorkspaceCsprojs, findCsprojsInDir } from './projects';
 import { formatRecordingTime, VideoRecordingState, registerScreenshotCommand } from './screenshotCommand';
+import { LivePreviewState } from './livePreview';
 import { deployBranch, registerBranchSetup } from './branchDeploy';
 import { parseDeployLink, PullRequestReference } from './branchSources';
 import {
@@ -87,10 +88,13 @@ let sbConfig: vscode.StatusBarItem;
 let sbDevice: vscode.StatusBarItem;
 let sbScreenshot: vscode.StatusBarItem;
 let sbVideo: vscode.StatusBarItem;
+let sbPreview: vscode.StatusBarItem;
 let isTakingScreenshot = false;
 let videoState: VideoRecordingState = 'idle';
 let videoMessage: string | undefined;
 let videoElapsedMs = 0;
+let previewState: LivePreviewState = 'idle';
+let previewMessage: string | undefined;
 
 
 // ── Lifecycle ──────────────────────────────────────────
@@ -118,6 +122,10 @@ export function activate(context: vscode.ExtensionContext) {
         videoState = nextState;
         videoMessage = message;
         videoElapsedMs = elapsedMs ?? 0;
+        updateStatusBar();
+    }, (nextState, message) => {
+        previewState = nextState;
+        previewMessage = message;
         updateStatusBar();
     });
     registerDebugHotReload(context);
@@ -204,6 +212,10 @@ function createStatusBar(context: vscode.ExtensionContext) {
     sbVideo.name = 'MAUI Deploy Video Recording';
     context.subscriptions.push(sbVideo);
 
+    sbPreview = vscode.window.createStatusBarItem('mauideploy.livePreview', vscode.StatusBarAlignment.Left, 94);
+    sbPreview.name = 'MAUI Deploy Live Device Preview';
+    context.subscriptions.push(sbPreview);
+
     updateStatusBar();
 }
 
@@ -226,6 +238,7 @@ function updateStatusBar() {
     const videoLabels: Record<Exclude<VideoRecordingState, 'idle' | 'recording'>, string> = {
         findingDevices: 'Finding devices', choosingDevice: 'Choose device', preparing: 'Preparing video',
         checkingHelper: 'Checking recorder', buildingHelper: 'Building recorder', waitingForUsb: 'Waiting for USB',
+        choosingUsbScreen: 'Selecting USB screen',
         waitingForPermission: 'Camera permission', starting: 'Starting video', finalizing: 'Finalizing video',
         downloading: 'Downloading video', validating: 'Checking video', previewing: 'Opening preview',
         saving: 'Saving video', cancelling: 'Cancelling video',
@@ -241,6 +254,26 @@ function updateStatusBar() {
         : `${videoMessage}${canCancelVideo ? '\nCancel recording' : ''}`;
     sbVideo.accessibilityInformation = { label: videoMessage || 'Record device video' };
     if (process.platform === 'darwin') { sbVideo.show(); }
+
+    const previewActive = previewState === 'live' || previewState === 'paused' || previewState === 'disconnected' || previewState === 'recording';
+    const previewLabel = previewState === 'waitingForUsb' ? 'Preview: waiting for USB'
+        : previewState === 'choosingUsbScreen' ? 'Preview: selecting USB screen'
+        : previewState === 'waitingForPermission' ? 'Preview: camera permission'
+        : previewState === 'checkingScrcpy' ? 'Checking scrcpy'
+        : previewState === 'waitingForScrcpyInstall' ? 'Preview: install scrcpy?'
+        : previewState === 'installingScrcpy' ? 'Installing scrcpy'
+        : previewState === 'recording' ? 'Preview recording'
+        : previewState === 'finalizingRecording' ? 'Finishing recording'
+        : previewState === 'paused' ? 'Preview paused'
+        : previewState === 'disconnected' ? 'Preview disconnected' : 'Live preview';
+    sbPreview.text = previewState === 'idle' ? '$(device-desktop)'
+        : previewActive ? `$(debug-stop) ${previewLabel}` : `$(loading~spin) ${previewLabel}`;
+    sbPreview.command = previewState === 'stopping' ? undefined
+        : previewState !== 'idle' ? 'mauideploy.stopLivePreview' : captureBusy ? undefined : 'mauideploy.livePreview';
+    sbPreview.tooltip = previewState === 'idle' ? 'Open a live device window to share in Teams, Slack, or Zoom'
+        : `${previewMessage}\nClose Live Device Preview`;
+    sbPreview.accessibilityInformation = { label: previewMessage || 'Live Device Preview' };
+    if (process.platform === 'darwin') { sbPreview.show(); }
 
     // ── Run button ──
     if (!isBuilding) {

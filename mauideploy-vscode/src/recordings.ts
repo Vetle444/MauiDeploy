@@ -15,6 +15,7 @@ export const videoCaptureMessages = {
     checkingHelper: 'Checking the macOS recording helper...',
     buildingHelper: 'Building the macOS recording helper for this Mac...',
     waitingForUsb: 'Waiting for USB iPhone (up to 2 minutes). Connect and unlock the selected iPhone, then trust this Mac.',
+    choosingUsbScreen: 'Resolving USB screen...',
     waitingForPermission: 'Waiting for camera permission. Allow access in the macOS permission prompt.',
     starting: 'Starting native video capture...',
     downloading: 'Downloading the Android recording...',
@@ -25,6 +26,8 @@ export type VideoCaptureStage = keyof typeof videoCaptureMessages;
 
 const recordingErrors: Record<string, string> = {
     USB_DEVICE_UNAVAILABLE: 'Connect the selected iPhone by USB, unlock it, and trust this Mac. Wi-Fi alone cannot provide USB video capture.',
+    USB_SCREEN_SELECTION_REQUIRED: 'macOS uses a separate identifier for this USB screen. Confirm the screen source in the device picker before capturing.',
+    SCREEN_DISCOVERY_FAILED: 'Could not discover USB screen sources. Check the iPhone connection and retry.',
     PERMISSION_DENIED: 'Allow camera access for VS Code or MAUI Deploy Screen Recorder in System Settings > Privacy & Security > Camera, then retry.',
     DEVICE_DISCONNECTED: 'The iPhone was disconnected. Reconnect it by USB and try again.',
     HELPER_BUILD_FAILED: 'Could not prepare the Mac recording helper. Select a full Xcode installation with its command line tools and try again.',
@@ -48,11 +51,36 @@ export interface VideoRecording {
     dispose: () => Promise<void>;
 }
 
+export async function validateVideoRecording(filename: string): Promise<void> {
+    const file = await fs.open(filename, 'r').catch(() => { throw new RecordingError('INVALID_VIDEO'); });
+    try {
+        const info = await file.stat();
+        const header = Buffer.alloc(12);
+        const { bytesRead } = await file.read(header, 0, header.length, 0);
+        if (info.size < 32 || info.size > videoSizeLimit || bytesRead !== header.length || header.toString('ascii', 4, 8) !== 'ftyp') {
+            throw new RecordingError('INVALID_VIDEO');
+        }
+    } finally { await file.close(); }
+    await fs.chmod(filename, 0o600);
+}
+
+export interface UsbScreenSource {
+    id: string;
+    name: string;
+}
+
+interface UsbScreenOptions {
+    signal: AbortSignal;
+    selectUsbScreen?: (sources: UsbScreenSource[], signal: AbortSignal) => Promise<string | undefined>;
+    onStage?: (stage: VideoCaptureStage) => void;
+}
+
 export interface VideoCaptureOptions {
     signal: AbortSignal;
     stop: AbortSignal;
     storage: string;
     extensionPath: string;
+    selectUsbScreen?: UsbScreenOptions['selectUsbScreen'];
     onStage?: (stage: VideoCaptureStage) => void;
     onStarted?: () => void;
     onProgress?: (elapsedMs: number) => void;
@@ -93,6 +121,48 @@ export async function prepareVideoHelper(extensionPath: string, storage: string,
     }
 }
 
+export function createUsbScreenSelection(child: ChildProcess, options: UsbScreenOptions, finish: (error?: unknown) => void) {
+    const selection = new AbortController();
+    let sources: UsbScreenSource[] = [];
+    let choosing = false;
+    let submitted: string | undefined;
+    const cancel = () => selection.abort();
+    options.signal.addEventListener('abort', cancel, { once: true });
+    if (options.signal.aborted) { cancel(); }
+    const choose = () => {
+        if (selection.signal.aborted || choosing || submitted || sources.length === 0) { return; }
+        if (!options.selectUsbScreen) { finish(new RecordingError('USB_SCREEN_SELECTION_REQUIRED')); return; }
+        choosing = true;
+        options.onStage?.('choosingUsbScreen');
+        void options.selectUsbScreen(sources, selection.signal).then(id => {
+            choosing = false;
+            if (selection.signal.aborted) { return; }
+            if (id === undefined) { finish(); return; }
+            if (!sources.some(source => source.id === id)) { choose(); return; }
+            if (!child.stdin?.writable) { finish(new RecordingError('SCREEN_DISCOVERY_FAILED')); return; }
+            submitted = id;
+            child.stdin.write(`${JSON.stringify({ screenId: id })}\n`);
+        }).catch(error => { if (!selection.signal.aborted) { finish(error); } });
+    };
+    return {
+        update(value: unknown) {
+            if (selection.signal.aborted) { return; }
+            if (!Array.isArray(value) || !value.every(source => source && typeof source.id === 'string'
+                && source.id.length > 0 && typeof source.name === 'string')) {
+                finish(new RecordingError('SCREEN_DISCOVERY_FAILED'));
+                return;
+            }
+            sources = value.map(source => ({ id: source.id, name: source.name }));
+            if (submitted && !sources.some(source => source.id === submitted)) { submitted = undefined; }
+            choose();
+        },
+        dispose() {
+            options.signal.removeEventListener('abort', cancel);
+            selection.abort();
+        },
+    };
+}
+
 export async function captureVideo(device: Device, options: VideoCaptureOptions): Promise<VideoRecording | undefined> {
     options.signal.throwIfAborted();
     if (options.stop.aborted) { return undefined; }
@@ -114,9 +184,11 @@ export async function captureVideo(device: Device, options: VideoCaptureOptions)
                 return line.includes('Recording started') ? 'started' : undefined;
             });
         } else {
-            started = await runRecorder(helper!, ['record', device.id, video], options, video.replace(/\.mp4$/, '.mov'), line => {
-                let event: { event?: string; code?: string };
+            started = await runRecorder(helper!, ['record', device.id, video], options, video.replace(/\.mp4$/, '.mov'), (line, screens) => {
+                let event: { event?: string; code?: string; devices?: unknown };
                 try { event = JSON.parse(line); } catch { return undefined; }
+                if (!event || typeof event !== 'object') { return undefined; }
+                if (event.event === 'screens') { screens(event.devices); return undefined; }
                 if (event.event === 'error') { throw new RecordingError(event.code || 'RECORDING_FAILED'); }
                 switch (event.event) {
                     case 'started': case 'finalizing': case 'waitingForUsb': case 'waitingForPermission': case 'starting':
@@ -128,16 +200,7 @@ export async function captureVideo(device: Device, options: VideoCaptureOptions)
         options.signal.throwIfAborted();
         if (!started) { return undefined; }
         options.onStage?.('validating');
-        const file = await fs.open(video, 'r').catch(() => { throw new RecordingError('INVALID_VIDEO'); });
-        try {
-            const info = await file.stat();
-            const header = Buffer.alloc(12);
-            const { bytesRead } = await file.read(header, 0, header.length, 0);
-            if (info.size < 32 || info.size > videoSizeLimit || bytesRead !== header.length || header.toString('ascii', 4, 8) !== 'ftyp') {
-                throw new RecordingError('INVALID_VIDEO');
-            }
-        } finally { await file.close(); }
-        await fs.chmod(video, 0o600);
+        await validateVideoRecording(video);
         retained = true;
         return { path: video, dispose };
     } finally {
@@ -180,13 +243,13 @@ async function recordAndroid(device: Device, video: string, options: VideoCaptur
 }
 
 async function runRecorder(command: string, args: string[], options: VideoCaptureOptions, growingFile: string,
-    readLine: (line: string) => 'started' | 'finalizing' | 'waitingForUsb' | 'waitingForPermission' | 'starting' | undefined,
+    readLine: (line: string, screens: (sources: unknown) => void) => 'started' | 'finalizing' | 'waitingForUsb' | 'waitingForPermission' | 'starting' | undefined,
     stopRemote?: () => Promise<void>): Promise<boolean> {
     options.signal.throwIfAborted();
     if (options.stop.aborted) { return false; }
     options.onStage?.('starting');
     return new Promise<boolean>((resolve, reject) => {
-        const child: ChildProcess = spawn(command, args, { cwd: options.storage, stdio: ['ignore', 'pipe', 'pipe'] });
+        const child: ChildProcess = spawn(command, args, { cwd: options.storage, stdio: ['pipe', 'pipe', 'pipe'] });
         let started = false;
         let stopping = false;
         let finalizing = false;
@@ -227,6 +290,7 @@ async function runRecorder(command: string, args: string[], options: VideoCaptur
         const stop = () => {
             if (stopping || closed) { return; }
             stopping = true;
+            usbSelection.dispose();
             clearTimeout(startupTimer);
             finalize();
             sendStop();
@@ -238,10 +302,20 @@ async function runRecorder(command: string, args: string[], options: VideoCaptur
                 stop();
             }, stage === 'starting' ? 60_000 : 120_000);
         };
+        const usbSelection = createUsbScreenSelection(child, {
+            ...options, onStage: stage => {
+                awaitStartup('waitingForUsb');
+                options.onStage?.(stage);
+            },
+        }, error => {
+            if (error) { failure = error instanceof RecordingError ? error : new RecordingError('SCREEN_DISCOVERY_FAILED'); }
+            stop();
+        });
         awaitStartup('starting');
         const ready = () => {
             if (started) { return; }
             started = true;
+            usbSelection.dispose();
             clearTimeout(startupTimer);
             if (stopping) { sendStop(); return; }
             const began = performance.now();
@@ -264,7 +338,7 @@ async function runRecorder(command: string, args: string[], options: VideoCaptur
                     const line = pending.slice(0, newline).trim();
                     pending = pending.slice(newline + 1);
                     try {
-                        const event = readLine(line);
+                        const event = readLine(line, usbSelection.update);
                         if (event === 'started') { ready(); }
                         if (event === 'finalizing') { finalize(); }
                         if (!started && !stopping && !closed
@@ -282,6 +356,9 @@ async function runRecorder(command: string, args: string[], options: VideoCaptur
         }
         options.signal.addEventListener('abort', stop, { once: true });
         options.stop.addEventListener('abort', stop, { once: true });
+        child.stdin?.on('error', () => {
+            if (!stopping && !closed) { failure = new RecordingError('SCREEN_DISCOVERY_FAILED'); stop(); }
+        });
         child.on('error', () => { failure = new RecordingError('RECORDER_UNAVAILABLE'); });
         child.on('close', (code, signal) => {
             closed = true;
@@ -289,6 +366,7 @@ async function runRecorder(command: string, args: string[], options: VideoCaptur
             clearTimeout(durationTimer);
             clearTimeout(finishTimer);
             clearInterval(progressTimer);
+            usbSelection.dispose();
             options.signal.removeEventListener('abort', stop);
             options.stop.removeEventListener('abort', stop);
             if (options.signal.aborted) { reject(options.signal.reason); }

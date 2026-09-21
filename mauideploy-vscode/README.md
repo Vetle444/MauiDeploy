@@ -9,6 +9,7 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 - Pick iOS simulators, paired iOS devices, or Android devices
 - Take device screenshots on macOS, open an in-memory preview, and automatically copy the image to the clipboard
 - Record native device video on macOS, preview it, and save an H.264 `.mp4` file
+- Open a live device window for screen sharing in Teams, Slack, or Zoom
 - Build and deploy MAUI apps without leaving VS Code
 - Deploy a branch or GitHub PR from a reusable, isolated worktree while an agent keeps working in your checkout
 - Deploy MAUI apps from the existing `bin` output without rebuilding
@@ -36,6 +37,8 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 - `MAUI Deploy: Stop Recording`
 - `MAUI Deploy: Cancel Recording`
 - `MAUI Deploy: Save Recording`
+- `MAUI Deploy: Live Device Preview`
+- `MAUI Deploy: Stop Live Device Preview`
 - `MAUI Deploy: Toggle Configuration`
 - `MAUI Deploy: Ask Copilot to Fix Build Error`
 - `MAUI Deploy: Open Logs`
@@ -105,6 +108,16 @@ including across VS Code windows. A dirty, repurposed, or unmanaged worktree is 
 reset, cleaned, or overwritten. A crash can leave `mauideploy.lock` in the repository's
 Git common directory; remove it only after confirming no deployment is still running.
 Stop an active MAUI debug session before deploying another branch from that window.
+
+If **MauiDeploy is already using this repository** appears, first check other VS
+Code windows for an active branch/PR deployment and let it finish or stop it. The
+lock is shared by all windows using that repository; it is unrelated to live
+preview or scrcpy. The current lock check tests file existence, not whether its
+recorded process is still alive. An abrupt extension-host crash or window reload
+can therefore leave a stale lock. To recover, stop all deployments and close their
+build/debug terminals first, confirming that no related build process remains.
+Then remove only the lock file at the exact path in the message and retry. Do not
+delete the Git directory or deployment worktree, and do not remove an active lock.
 
 Worktrees isolate normal source and `bin`/`obj` output, **not the device or app data**.
 Deploying the same application ID replaces the installed app. Custom absolute output
@@ -237,11 +250,13 @@ Capture and paste sensitive screens only where appropriate.
 - **iOS Simulator:** uses Xcode's `simctl` and requires a booted simulator.
 - **Android devices/emulators:** uses the Android SDK's `adb`; the device must
 	be connected and authorized.
-- **Physical iPhone:** uses the external `pymobiledevice3` helper and Apple's
-	native macOS tunnel. The phone must be paired, reachable, and configured for
-	development. Wi-Fi capture is verified on iPhone 15 Pro / iOS 26.6.1. Other
-	iOS/macOS combinations and USB capture with this helper still need hardware
-	verification.
+- **Physical iPhone:** uses the external `pymobiledevice3` helper. USB capture
+	uses its automatic connection selection so it can fall back when Apple's native
+	tunnel is unavailable; Wi-Fi capture retains native macOS tunnel discovery.
+	The phone must be paired, reachable, and configured for development. Wi-Fi
+	capture is verified on iPhone 15 Pro / iOS 26.6.1, and USB PNG capture has also
+	been verified on a connected iPhone. Other iOS/macOS combinations still need
+	hardware verification.
 
 The first physical-iPhone capture asks permission to install the helper. MAUI
 Deploy uses Xcode's available `python3` to bootstrap `uv` 0.12.13, then installs
@@ -283,12 +298,17 @@ bar shows the current phase even when the notification is hidden.
 
 macOS may ask for camera access for VS Code or MAUI Deploy Screen Recorder.
 Allow it in **System Settings > Privacy & Security > Camera** if needed. The
-helper matches the selected iPhone's device identifier and never falls back to
-the Mac camera or another phone. Audio is not recorded.
+helper uses only USB screen sources, never the Mac camera. macOS can give a screen
+a different identifier from the phone's deployment UDID. When the selected iPhone
+is the only phone connected by USB and one screen source is available, MauiDeploy
+selects it automatically. A **USB Screen** picker appears only when the choice is
+ambiguous or the USB connection cannot be verified. Discovery, selection, and
+capture stay in the same native process so the selected screen remains available.
+Audio is not recorded.
 
 When the selected iPhone is not available over USB, **Waiting for USB** remains
-visible for up to two minutes. Connect and unlock that phone and trust this Mac;
-capture continues automatically when it becomes available. A separate **Camera
+visible for up to two minutes. Connect and unlock that phone and trust this Mac,
+then confirm its USB screen if prompted. A separate **Camera
 permission** state identifies a pending macOS access prompt. Neither state means
 video is already being recorded. Click the busy status-bar item, cancel the
 notification, or run **MAUI Deploy: Cancel Recording** to cancel preparation.
@@ -318,6 +338,67 @@ terminating VS Code may leave temporary files behind. An Android disconnection
 can prevent device-side cleanup; a warning identifies the temporary directory
 to remove after reconnecting. Record and share sensitive screens only where
 appropriate. Recording currently requires a local macOS extension host.
+
+## Live Device Preview (macOS)
+
+Click the monitor icon beside the recording button, or run **MAUI Deploy: Live
+Device Preview**, and choose a device. Then select the **MAUI Deploy - device
+name** window in your meeting app's window-sharing picker. For an iOS simulator,
+select its Simulator window instead. MauiDeploy opens the local preview; your
+meeting app handles broadcasting. It does not start a call or upload video.
+
+- **Physical iPhone:** uses native USB video, the same automatic screen selection
+	and macOS camera permission as recording. Connect, unlock, and trust the phone.
+	A second screen picker is needed only when the source cannot be matched unambiguously.
+	The preview uses SwiftUI's native Liquid Glass buttons on macOS 26+ when built
+	with Xcode 26+, with standard native buttons on older systems. Camera,
+	record/stop, and pause/resume controls use SF Symbols with tooltips. There are
+	no pin or fullscreen buttons. The title shows live/paused status or the recording
+	timer. The window fits the device aspect ratio on startup and rotation, and the
+	controls remain outside the device image. A disconnection clears the image;
+	reconnect and start a new preview to resume.
+- **Android:** requires [scrcpy 3 or newer](https://github.com/Genymobile/scrcpy)
+	and Android SDK platform tools. If scrcpy is missing or outdated, MauiDeploy
+	offers **Install and Continue** or **Upgrade and Continue** using your existing
+	Homebrew installation. It shows cancellable installation progress, verifies the
+	installed version, then resumes the selected preview automatically. A suitable
+	Homebrew copy is reused even when it is not on VS Code's PATH. Homebrew itself
+	is not installed automatically; missing Homebrew opens setup guidance. Manual
+	setup is also supported with `brew install scrcpy` or `brew upgrade scrcpy`.
+	MauiDeploy selects the exact authorized USB or wireless-ADB device and starts
+	a view-only scrcpy window with audio, clipboard synchronization, and device
+	control disabled. Scrcpy handles orientation and window resizing. Its native
+	shortcuts include Cmd+F for fullscreen, Cmd+Z to freeze the display, and
+	Cmd+Shift+Z to resume. No installation runs without confirmation, and cancelled
+	or failed setup never starts a preview.
+- **iOS simulator:** brings the chosen booted Simulator forward using the selected
+	Xcode installation. Use Simulator's own window controls. MauiDeploy does not
+	shut down the simulator or close other Simulator windows when the command ends.
+
+Enable `mauideploy.livePreview.alwaysOnTop` to open iPhone and Android preview
+windows above other windows; it defaults to `false`. This is a VS Code setting,
+not an in-window pin button, and does not affect Simulator.
+
+The progress notification closes when the preview is live. The status-bar button
+continues showing the session state and becomes **Stop Live Device Preview**.
+Closing the native preview window or stopping the preview ends only the helper
+started by MauiDeploy. Reloading or closing the extension also stops it.
+
+Previewing alone saves no files and does not capture audio. In the iPhone window,
+the camera button captures the displayed device frame (including a paused frame),
+opens it in VS Code, and copies it to the clipboard without including window
+controls. Record starts an explicit silent clip while the preview stays open;
+Stop finishes it and opens the existing MP4 preview, Save Video dialog, and Finder
+flow. The three-minute recording limit still applies. Closing the window before
+the clip is finalized discards the unfinished recording.
+
+The VS Code screenshot and recording commands remain available. Starting a
+separate recording through the status bar still asks before closing an active
+preview. These are local macOS workflows; remote-host previews are not supported.
+Phone notifications are visible in the preview, so consider Focus mode during
+demos. USB iPhone startup through the first rendered live frame has been verified
+on hardware. Sustained frame rate, in-window recording on real devices,
+meeting-app sharing, and wireless-ADB streaming still need broader verification.
 
 ## Android Build Performance
 

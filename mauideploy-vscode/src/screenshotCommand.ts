@@ -2,9 +2,10 @@ import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
-import { Device, detectScreenshotDevices } from './devices';
+import { Device, detectIosPhysicalDevices, detectScreenshotDevices } from './devices';
 import { captureScreenshot, copyScreenshot } from './screenshots';
-import { captureVideo, RecordingError, VideoCaptureStage, VideoRecording, videoCaptureMessages, videoDurationLimitMs } from './recordings';
+import { captureVideo, RecordingError, UsbScreenSource, VideoCaptureStage, VideoRecording, videoCaptureMessages, videoDurationLimitMs } from './recordings';
+import { LivePreviewError, LivePreviewState, livePreviewMessages, openLivePreview } from './livePreview';
 import { installScreenshotTools, screenshotPythonPath, screenshotToolsReady } from './screenshotTools';
 
 export type VideoRecordingState = VideoCaptureStage | 'idle' | 'findingDevices' | 'choosingDevice' | 'preparing'
@@ -16,14 +17,18 @@ export function formatRecordingTime(elapsedMs: number): string {
 }
 
 export function registerScreenshotCommand(context: vscode.ExtensionContext, selectedDevice: () => string | undefined, setBusy: (busy: boolean) => void,
-    setVideoState: (state: VideoRecordingState, message?: string, elapsedMs?: number) => void = () => {}): void {
+    setVideoState: (state: VideoRecordingState, message?: string, elapsedMs?: number) => void = () => {},
+    setPreviewState: (state: LivePreviewState, message?: string) => void = () => {}): void {
     let controller: AbortController | undefined;
     let stop: AbortController | undefined;
     let cancelVideo: (() => void) | undefined;
+    let previewController: AbortController | undefined;
+    let previewCompletion: Promise<void> | undefined;
     const panels = new Set<vscode.WebviewPanel>();
     const recordings = new Map<vscode.WebviewPanel, VideoRecording>();
     const screenshotOutput = vscode.window.createOutputChannel('MAUI Deploy - Screenshots');
     const recordingOutput = vscode.window.createOutputChannel('MAUI Deploy - Recordings');
+    const previewOutput = vscode.window.createOutputChannel('MAUI Deploy - Live Preview');
     const discard = (video: VideoRecording) => video.dispose().catch(() => {
         recordingOutput.appendLine('Could not remove a temporary video from MAUI Deploy recording storage.');
     });
@@ -54,12 +59,202 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
         }
         return true;
     };
-    context.subscriptions.push(screenshotOutput, recordingOutput);
+    const showScreenshot = async (image: Buffer, name: string, signal: AbortSignal,
+        report?: (message: string) => void): Promise<boolean> => {
+        signal.throwIfAborted();
+        const panel = vscode.window.createWebviewPanel(
+            'mauideploy.screenshot', `Screenshot - ${name} - ${new Date().toLocaleTimeString()}`,
+            vscode.ViewColumn.Active, { enableScripts: false, localResourceRoots: [] },
+        );
+        panels.add(panel);
+        panel.onDidDispose(() => panels.delete(panel));
+        panel.webview.html = screenshotHtml(image);
+        panel.reveal(vscode.ViewColumn.Active, false);
+        screenshotOutput.appendLine('Preview opened.');
+        report?.('Copying image to clipboard...');
+        try {
+            await copyScreenshot(image, signal);
+            screenshotOutput.appendLine('Image copied to clipboard.');
+            vscode.window.setStatusBarMessage('Screenshot copied to clipboard.', 5000);
+            return true;
+        } catch {
+            screenshotOutput.appendLine('Clipboard copy failed or was cancelled; preview retained.');
+            return false;
+        }
+    };
+    const showRecording = async (video: VideoRecording, name: string) => {
+        let panel: vscode.WebviewPanel;
+        try {
+            panel = vscode.window.createWebviewPanel(
+                'mauideploy.recording', `Recording - ${name} - ${new Date().toLocaleTimeString()}`,
+                vscode.ViewColumn.Active, { enableScripts: false, localResourceRoots: [vscode.Uri.file(path.dirname(video.path))] },
+            );
+        } catch (error) { await discard(video); throw error; }
+        panels.add(panel);
+        recordings.set(panel, video);
+        panel.onDidDispose(() => {
+            panels.delete(panel);
+            recordings.delete(panel);
+            void discard(video);
+        });
+        try {
+            panel.webview.html = videoHtml(panel.webview.asWebviewUri(vscode.Uri.file(video.path)).toString(), panel.webview.cspSource);
+            panel.reveal(vscode.ViewColumn.Active, false);
+        } catch (error) { panel.dispose(); throw error; }
+        recordingOutput.appendLine('Video preview opened.');
+    };
+    context.subscriptions.push(screenshotOutput, recordingOutput, previewOutput);
     context.subscriptions.push({ dispose: () => {
         controller?.abort();
+        previewController?.abort();
         for (const panel of panels) { panel.dispose(); }
         panels.clear();
     } });
+    const launchPreview = async () => {
+        if (process.platform !== 'darwin') {
+            await vscode.window.showInformationMessage('Live Device Preview currently requires macOS.');
+            return;
+        }
+        if (!vscode.workspace.isTrusted) {
+            await vscode.window.showWarningMessage('Trust this workspace before running device tools.');
+            return;
+        }
+        if (controller) {
+            await vscode.window.showInformationMessage('Wait for the current capture to finish before opening Live Device Preview.');
+            return;
+        }
+        const operation = new AbortController();
+        previewController = operation;
+        const cancellation = new vscode.CancellationTokenSource();
+        const cancelPicker = () => cancellation.cancel();
+        operation.signal.addEventListener('abort', cancelPicker, { once: true });
+        let progress: vscode.Progress<{ message?: string }> | undefined;
+        let running: Promise<void> | undefined;
+        let started = false;
+        let simulatorOpened = false;
+        let completeStartup: () => void = () => {};
+        const ready = new Promise<void>(resolve => { completeStartup = resolve; });
+        const report = (state: Exclude<LivePreviewState, 'idle'>) => {
+            if (operation.signal.aborted && state !== 'stopping') { return; }
+            const message = livePreviewMessages[state];
+            previewOutput.appendLine(message);
+            setPreviewState(state, message);
+            progress?.report({ message });
+            if (state === 'simulatorOpened') { simulatorOpened = true; }
+            if (state === 'live' || state === 'simulatorOpened') { started = true; completeStartup(); }
+        };
+        try {
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification, title: 'MAUI Deploy: Live Device Preview', cancellable: true,
+            }, async (notification, token) => {
+                progress = notification;
+                const subscription = token.onCancellationRequested(() => operation.abort());
+                try {
+                    if (token.isCancellationRequested) { operation.abort(); }
+                    if (operation.signal.aborted) { return; }
+                    report('findingDevices');
+                    const device = await chooseScreenshotDevice(selectedDevice(), 'Live Device Preview', cancellation.token,
+                        () => report('choosingDevice'));
+                    if (!device || operation.signal.aborted) { return; }
+                    running = openLivePreview(device, {
+                        signal: operation.signal, storage: path.join(context.globalStorageUri.fsPath, 'recordings'),
+                        extensionPath: context.extensionPath, onState: report,
+                        alwaysOnTop: vscode.workspace.getConfiguration('mauideploy').get<boolean>('livePreview.alwaysOnTop', false),
+                        selectUsbScreen: (sources, signal) => chooseUsbScreen(device, sources, signal),
+                        onScreenshot: async (image, signal) => {
+                            if (controller) { throw new Error('A capture is already running.'); }
+                            const captureController = new AbortController();
+                            const cancel = () => captureController.abort();
+                            signal.addEventListener('abort', cancel, { once: true });
+                            if (signal.aborted) { cancel(); }
+                            controller = captureController;
+                            setBusy(true);
+                            screenshotOutput.appendLine('Screenshot requested from live preview.');
+                            try {
+                                const copied = await vscode.window.withProgress({
+                                    location: vscode.ProgressLocation.Notification, title: `Screenshot: ${device.name}`, cancellable: true,
+                                }, async (notification, token) => {
+                                    const subscription = token.onCancellationRequested(cancel);
+                                    try {
+                                        if (token.isCancellationRequested) { cancel(); }
+                                        return await showScreenshot(image, device.name, captureController.signal, message => notification.report({ message }));
+                                    } finally { subscription.dispose(); }
+                                });
+                                if (!copied) { throw new Error('Screenshot clipboard copy failed.'); }
+                            } finally {
+                                signal.removeEventListener('abort', cancel);
+                                controller = undefined;
+                                setBusy(false);
+                            }
+                        },
+                        onRecordingReady: async video => {
+                            operation.signal.throwIfAborted();
+                            await showRecording(video, device.name);
+                            try {
+                                await vscode.window.withProgress({
+                                    location: vscode.ProgressLocation.Notification, title: 'MAUI Deploy: Save Recording', cancellable: false,
+                                }, notification => saveVideo(video, undefined, message => notification.report({ message })));
+                            } catch {
+                                await vscode.window.showErrorMessage('The recording preview is open, but saving failed. Choose a writable destination using Save Recording.');
+                            }
+                        },
+                        onCaptureError: message => {
+                            previewOutput.appendLine(message);
+                            void vscode.window.showWarningMessage(message);
+                        },
+                        confirmScrcpyInstall: async action => {
+                            operation.signal.throwIfAborted();
+                            const label = action === 'upgrade' ? 'Upgrade and Continue' : 'Install and Continue';
+                            const choice = await vscode.window.showInformationMessage('Android live preview needs scrcpy 3 or newer.', {
+                                modal: true,
+                                detail: `Run brew ${action} scrcpy using your existing Homebrew installation. This downloads scrcpy and its dependencies and may take a few minutes. No project files or device data are changed.`,
+                            }, label);
+                            operation.signal.throwIfAborted();
+                            return choice === label;
+                        },
+                    });
+                    await Promise.race([running, ready]);
+                } finally {
+                    progress = undefined;
+                    subscription.dispose();
+                }
+            });
+            if (running) { await running; }
+            vscode.window.setStatusBarMessage(simulatorOpened ? 'Simulator window opened.'
+                : started ? 'Live Device Preview closed.' : 'Live Device Preview cancelled.', 5000);
+        } catch (error) {
+            if (!operation.signal.aborted) {
+                const known = error instanceof LivePreviewError || error instanceof RecordingError;
+                previewOutput.appendLine(`Live preview failed: ${known ? error.code : 'unknown'}.`);
+                previewOutput.show(true);
+                const message = known ? error.message : 'Check the selected device connection and try again.';
+                const action = await vscode.window.showErrorMessage(`Could not open Live Device Preview. ${message}`, 'Open Setup Guide');
+                if (action === 'Open Setup Guide') {
+                    const guide = error instanceof LivePreviewError && error.code === 'HOMEBREW_UNAVAILABLE'
+                        ? 'https://brew.sh'
+                        : error instanceof LivePreviewError && error.code.startsWith('SCRCPY_')
+                            ? 'https://github.com/Genymobile/scrcpy/blob/master/doc/macos.md'
+                            : 'https://github.com/Vetle444/MauiDeploy#readme';
+                    await vscode.env.openExternal(vscode.Uri.parse(guide));
+                }
+            }
+        } finally {
+            operation.signal.removeEventListener('abort', cancelPicker);
+            cancellation.dispose();
+            previewController = undefined;
+            previewCompletion = undefined;
+            setPreviewState('idle');
+        }
+    };
+    context.subscriptions.push(vscode.commands.registerCommand('mauideploy.livePreview', () => {
+        if (previewController) { return; }
+        previewCompletion = launchPreview();
+        return previewCompletion;
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('mauideploy.stopLivePreview', () => {
+        previewController?.abort();
+        return previewCompletion;
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('mauideploy.stopRecording', () => stop?.abort()));
     context.subscriptions.push(vscode.commands.registerCommand('mauideploy.cancelRecording', () => cancelVideo?.()));
     context.subscriptions.push(vscode.commands.registerCommand('mauideploy.saveRecording', async () => {
@@ -85,6 +280,13 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
         if (!vscode.workspace.isTrusted) {
             await vscode.window.showWarningMessage('Trust this workspace before running device tools.');
             return;
+        }
+        if (kind === 'video' && previewController) {
+            const action = 'Stop Preview and Record';
+            if (await vscode.window.showInformationMessage('Close Live Device Preview before recording video?', action) !== action) { return; }
+            previewController?.abort();
+            await previewCompletion;
+            if (controller) { return; }
         }
         controller = new AbortController();
         const signal = controller.signal;
@@ -141,6 +343,7 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
                         stop = new AbortController();
                         const video = await captureVideo(device, {
                             signal, stop: stop.signal, storage, extensionPath: context.extensionPath,
+                            selectUsbScreen: (sources, signal) => chooseUsbScreen(device, sources, signal),
                             onStage: nextStage => reportVideo(nextStage, videoCaptureMessages[nextStage]),
                             onStarted: () => {
                                 output.appendLine('Native recording started.');
@@ -162,24 +365,8 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
                         if (signal.aborted) { await discard(video); return; }
                         stage = 'open the video preview';
                         reportVideo('previewing', 'Opening video preview...');
-                        let panel: vscode.WebviewPanel;
-                        try {
-                            panel = vscode.window.createWebviewPanel(
-                                'mauideploy.recording', `Recording - ${device.name} - ${new Date().toLocaleTimeString()}`,
-                                vscode.ViewColumn.Active, { enableScripts: false, localResourceRoots: [vscode.Uri.file(path.dirname(video.path))] },
-                            );
-                        } catch (error) { await discard(video); throw error; }
-                        panels.add(panel);
-                        recordings.set(panel, video);
-                        panel.onDidDispose(() => {
-                            panels.delete(panel);
-                            recordings.delete(panel);
-                            void discard(video);
-                        });
-                        panel.webview.html = videoHtml(panel.webview.asWebviewUri(vscode.Uri.file(video.path)).toString(), panel.webview.cspSource);
-                        panel.reveal(vscode.ViewColumn.Active, false);
+                        await showRecording(video, device.name);
                         previewReady = true;
-                        output.appendLine('Video preview opened.');
                         stage = 'save the video';
                         completionMessage = 'Recording ready (not saved).';
                         if (await saveVideo(video, signal, message => reportVideo('saving', message))) {
@@ -193,25 +380,9 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
                     if (signal.aborted) { return; }
                     output.appendLine(`PNG received: ${image.length} bytes.`);
                     stage = 'open the screenshot preview';
-                    const panel = vscode.window.createWebviewPanel(
-                        'mauideploy.screenshot', `Screenshot - ${device.name} - ${new Date().toLocaleTimeString()}`,
-                        vscode.ViewColumn.Active, { enableScripts: false, localResourceRoots: [] },
-                    );
-                    panels.add(panel);
-                    panel.onDidDispose(() => panels.delete(panel));
-                    panel.webview.html = screenshotHtml(image);
-                    panel.reveal(vscode.ViewColumn.Active, false);
-                    output.appendLine('Preview opened.');
-                    progress.report({ message: 'Copying image to clipboard...' });
-                    try {
-                        await copyScreenshot(image, signal);
-                        output.appendLine('Image copied to clipboard.');
-                        vscode.window.setStatusBarMessage('Screenshot copied to clipboard.', 5000);
-                    } catch {
-                        output.appendLine('Clipboard copy failed or was cancelled; preview retained.');
-                        if (!signal.aborted) {
-                            await vscode.window.showWarningMessage('The screenshot is open, but copying the image to the clipboard failed.');
-                        }
+                    const copied = await showScreenshot(image, device.name, signal, message => progress.report({ message }));
+                    if (!copied && !signal.aborted) {
+                        await vscode.window.showWarningMessage('The screenshot is open, but copying the image to the clipboard failed.');
                     }
                 } finally { subscription?.dispose(); }
             };
@@ -285,6 +456,37 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
     context.subscriptions.push(vscode.commands.registerCommand('mauideploy.recordVideo', () => capture('video')));
 }
 
+async function chooseUsbScreen(device: Device, sources: UsbScreenSource[], signal: AbortSignal): Promise<string | undefined> {
+    signal.throwIfAborted();
+    if (sources.length === 1) {
+        const connected = (await detectIosPhysicalDevices()).filter(candidate =>
+            candidate.platform === 'iOS' && candidate.type === 'physical' && candidate.transport === 'USB');
+        signal.throwIfAborted();
+        const normalize = (id: string) => id.replace(/-/g, '').toLowerCase();
+        if (connected.length === 1 && normalize(connected[0].id) === normalize(device.id)) {
+            return sources[0].id;
+        }
+    }
+    const cancellation = new vscode.CancellationTokenSource();
+    const cancel = () => cancellation.cancel();
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+        if (signal.aborted) { cancel(); }
+        const items = sources.map(source => ({
+            label: `$(device-mobile) ${source.name}`, description: `USB screen - ${source.id.slice(-8)}`, screenId: source.id,
+        }));
+        const choice = await vscode.window.showQuickPick(items, {
+            title: `USB Screen - ${device.name}`, placeHolder: 'Confirm the connected iPhone screen',
+            matchOnDescription: true, ignoreFocusOut: true,
+        }, cancellation.token);
+        signal.throwIfAborted();
+        return choice?.screenId;
+    } finally {
+        signal.removeEventListener('abort', cancel);
+        cancellation.dispose();
+    }
+}
+
 async function chooseScreenshotDevice(selectedId?: string, title = 'Take Screenshot', cancellation?: vscode.CancellationToken,
     onChoosing?: () => void): Promise<Device | undefined> {
     const devices = cancellation ? await detectScreenshotDevices() : await vscode.window.withProgress({
@@ -297,15 +499,15 @@ async function chooseScreenshotDevice(selectedId?: string, title = 'Take Screens
         return left.platform.localeCompare(right.platform) || left.name.localeCompare(right.name);
     });
     if (devices.length === 0) {
-        await vscode.window.showInformationMessage(title === 'Record Video'
-            ? 'No recording devices found. Connect and unlock a paired iPhone by USB, or start a simulator/emulator.'
+        await vscode.window.showInformationMessage(title !== 'Take Screenshot'
+            ? 'No capture devices found. Connect and unlock a paired iPhone by USB, or start a simulator/emulator.'
             : 'No screenshot devices found. Connect a paired phone or start a simulator/emulator.');
         return undefined;
     }
     const itemForDevice = (device: Device) => ({
         label: `$(device-mobile) ${device.name}`,
         description: [device.runtime || device.platform, device.type, device.transport,
-            title === 'Record Video' && device.platform === 'iOS' && device.type === 'physical' ? 'USB required' : undefined,
+            title !== 'Take Screenshot' && device.platform === 'iOS' && device.type === 'physical' ? 'USB required' : undefined,
         ].filter(Boolean).join(' - '),
         device,
     });

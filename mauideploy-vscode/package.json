@@ -2,7 +2,7 @@
   "name": "maui-deploy",
   "displayName": "MauiDeploy",
   "description": "Rider-like toolbar for building, deploying, and debugging with Hot-Reload in .NET MAUI apps",
-  "version": "1.6.4",
+  "version": "1.6.5",
   "author": "FinstadProductions",
   "publisher": "FinstadProductions",
   "license": "MIT",
@@ -41,6 +41,11 @@
     "configuration": {
       "title": "MAUI Deploy",
       "properties": {
+        "mauideploy.livePreview.alwaysOnTop": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open physical-device preview windows above other windows. Does not change the iOS Simulator window."
+        },
         "mauideploy.android.fastDeployment": {
           "type": "boolean",
           "default": true,
@@ -166,6 +171,16 @@
         "command": "mauideploy.saveRecording",
         "title": "MAUI Deploy: Save Recording",
         "icon": "$(save)"
+      },
+      {
+        "command": "mauideploy.livePreview",
+        "title": "MAUI Deploy: Live Device Preview",
+        "icon": "$(device-desktop)"
+      },
+      {
+        "command": "mauideploy.stopLivePreview",
+        "title": "MAUI Deploy: Stop Live Device Preview",
+        "icon": "$(debug-stop)"
       },
       {
         "command": "mauideploy.run",

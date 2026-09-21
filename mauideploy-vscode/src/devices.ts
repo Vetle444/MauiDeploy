@@ -74,7 +74,7 @@ export async function detectScreenshotDevices(): Promise<Device[]> {
     return groups.flat().filter(device => device.available !== false && device.state !== 'Shutdown');
 }
 
-async function detectIosPhysicalDevices(): Promise<Device[]> {
+export async function detectIosPhysicalDevices(): Promise<Device[]> {
     const devices: Device[] = [];
     try {
         const { stdout } = await execFileAsync('xcrun', [

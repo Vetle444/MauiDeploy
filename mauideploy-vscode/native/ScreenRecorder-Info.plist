@@ -9,6 +9,6 @@
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>NSCameraUsageDescription</key>
-    <string>MAUI Deploy records the screen of the USB-connected iPhone you select. It does not record your Mac camera or microphone.</string>
+    <string>MAUI Deploy previews or records the screen of the USB-connected iPhone you select. It does not capture your Mac camera or microphone.</string>
 </dict>
 </plist>

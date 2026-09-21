@@ -2,6 +2,25 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 1.6.5 - 2026-09-21
+
+### Added
+- Add Live Device Preview and Stop Live Device Preview commands with a monitor button, cancellable startup, and visible USB, permission, live, paused, and disconnected states.
+- Open a dedicated native USB iPhone window with SwiftUI Liquid Glass capture buttons on macOS 26+ (Xcode 26+), native fallback controls, and automatic aspect fitting on startup and rotation. Remove pin/fullscreen buttons; keep screenshot, record/stop, and pause controls outside the device image.
+- Capture the displayed or paused iPhone frame and record silent video directly from the live window. Reuse VS Code screenshot/clipboard and MP4 preview/save/Finder workflows without closing the live preview.
+- Use view-only scrcpy 3+ for authorized Android devices over USB or wireless ADB, and bring the selected iOS Simulator window forward for sharing in a meeting app.
+- Offer cancellable Homebrew scrcpy installation or upgrade with explicit consent, verify the installed version and resume Android preview automatically. Reuse an existing Homebrew copy outside PATH and provide guidance when Homebrew is unavailable.
+- Preserve screenshots and the existing explicit video-recording workflow; request confirmation before closing a preview to start a separate recording from the VS Code toolbar. Stop owned preview processes on close or extension disposal without recording or uploading automatically.
+
+### Fixed
+- Allow the iPhone screenshot helper's automatic connection fallback over USB instead of forcing an unavailable native tunnel. Preserve native discovery for Wi-Fi screenshots.
+- Resolve USB iPhone screen-source identifiers separately from deployment UDIDs. Confirm the native screen when needed and keep selection and capture in one process, preventing preview and recording from staying on Waiting for USB despite a connected phone.
+- Skip extra screen confirmation for preview and recording when the selected iPhone is the only USB phone and one screen source is available. Retain source selection for ambiguous or unverified connections.
+
+### Notes
+- Live preview requires a local macOS extension host. Physical iPhones require USB; Android preview requires scrcpy 3+ and authorized ADB. Meeting apps handle screen sharing; MauiDeploy does not upload or broadcast video itself.
+- USB iPhone preview startup and PNG capture were verified on hardware. Liquid Glass light/dark rendering and capture controls were checked with synthetic frames. Sustained streaming, in-window recording on real devices, meeting-app sharing, and wireless-ADB streaming still need broader hardware validation.
+
 ## 1.6.4 - 2026-09-21
 
 ### Added
