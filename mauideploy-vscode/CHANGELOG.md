@@ -2,6 +2,19 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 1.6.4 - 2026-09-21
+
+### Added
+- Add a native video recording button beside the screenshot camera, with start/stop commands, MP4 playback, a save dialog, and a Save Recording action for retries.
+- Reveal the saved video in Finder after successful local saves, including saves from the preview. Keep the saved video if opening Finder fails.
+- Capture physical iPhones over USB with a bundled macOS AVFoundation helper targeting 30 FPS when supported, iOS simulators with `simctl`, and Android devices with `screenrecord`. No on-device test helper or video encoder download is needed.
+- Bound recordings to three minutes, finalize on Stop, discard on Cancel, and clean temporary files when previews close. Keep screenshots, Wi-Fi screenshot support, and deployment targets unchanged.
+- Show recording progress immediately, including device discovery, helper compilation, USB and camera-permission waits, finalization, download, and saving. Keep phase labels and an elapsed recording timer in the status bar, support cancellation during preparation, and wait up to two minutes for the selected USB iPhone to connect.
+
+### Notes
+- Video recording requires a local macOS extension host. Physical iPhones require USB; recordings are silent, and actual frame rate depends on the device.
+- Automated checks cover recording lifecycle, cancellation, native helper setup, and video playback. Live device recording and USB reconnection still need end-to-end hardware validation.
+
 ## 1.6.3 - 2026-09-18
 
 ### Fixed

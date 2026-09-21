@@ -11,7 +11,7 @@ import {
 } from './devices';
 import { DevicePickItem, showDevicePicker } from './devicePicker';
 import { findWorkspaceMauiProjects, findWorkspaceCsprojs, findCsprojsInDir } from './projects';
-import { registerScreenshotCommand } from './screenshotCommand';
+import { formatRecordingTime, VideoRecordingState, registerScreenshotCommand } from './screenshotCommand';
 import { deployBranch, registerBranchSetup } from './branchDeploy';
 import { parseDeployLink, PullRequestReference } from './branchSources';
 import {
@@ -86,7 +86,11 @@ let sbProject: vscode.StatusBarItem;
 let sbConfig: vscode.StatusBarItem;
 let sbDevice: vscode.StatusBarItem;
 let sbScreenshot: vscode.StatusBarItem;
+let sbVideo: vscode.StatusBarItem;
 let isTakingScreenshot = false;
+let videoState: VideoRecordingState = 'idle';
+let videoMessage: string | undefined;
+let videoElapsedMs = 0;
 
 
 // ── Lifecycle ──────────────────────────────────────────
@@ -109,6 +113,11 @@ export function activate(context: vscode.ExtensionContext) {
     }));
     registerScreenshotCommand(context, () => state.deviceId, busy => {
         isTakingScreenshot = busy;
+        updateStatusBar();
+    }, (nextState, message, elapsedMs) => {
+        videoState = nextState;
+        videoMessage = message;
+        videoElapsedMs = elapsedMs ?? 0;
         updateStatusBar();
     });
     registerDebugHotReload(context);
@@ -191,6 +200,10 @@ function createStatusBar(context: vscode.ExtensionContext) {
     sbScreenshot = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 96);
     context.subscriptions.push(sbScreenshot);
 
+    sbVideo = vscode.window.createStatusBarItem('mauideploy.recordVideo', vscode.StatusBarAlignment.Left, 95);
+    sbVideo.name = 'MAUI Deploy Video Recording';
+    context.subscriptions.push(sbVideo);
+
     updateStatusBar();
 }
 
@@ -204,10 +217,30 @@ function updateStatusBar() {
     }
     sbBranch.show();
 
-    sbScreenshot.text = isTakingScreenshot ? '$(loading~spin)' : '$(device-camera)';
-    sbScreenshot.command = isTakingScreenshot ? undefined : 'mauideploy.screenshot';
+    const captureBusy = isTakingScreenshot || videoState !== 'idle';
+    sbScreenshot.text = captureBusy ? '$(loading~spin)' : '$(device-camera)';
+    sbScreenshot.command = captureBusy ? undefined : 'mauideploy.screenshot';
     sbScreenshot.tooltip = 'Take a device screenshot and copy it to the clipboard';
     if (process.platform === 'darwin') { sbScreenshot.show(); }
+
+    const videoLabels: Record<Exclude<VideoRecordingState, 'idle' | 'recording'>, string> = {
+        findingDevices: 'Finding devices', choosingDevice: 'Choose device', preparing: 'Preparing video',
+        checkingHelper: 'Checking recorder', buildingHelper: 'Building recorder', waitingForUsb: 'Waiting for USB',
+        waitingForPermission: 'Camera permission', starting: 'Starting video', finalizing: 'Finalizing video',
+        downloading: 'Downloading video', validating: 'Checking video', previewing: 'Opening preview',
+        saving: 'Saving video', cancelling: 'Cancelling video',
+    };
+    sbVideo.text = videoState === 'recording' ? `$(debug-stop) ${formatRecordingTime(videoElapsedMs)}`
+        : videoState !== 'idle' ? `$(loading~spin) ${videoLabels[videoState]}` : '$(record)';
+    const canCancelVideo = videoState !== 'idle' && videoState !== 'cancelling' && videoState !== 'saving';
+    sbVideo.command = videoState === 'recording' ? 'mauideploy.stopRecording'
+        : canCancelVideo ? 'mauideploy.cancelRecording' : captureBusy ? undefined : 'mauideploy.recordVideo';
+    sbVideo.color = videoState === 'recording' ? new vscode.ThemeColor('errorForeground') : undefined;
+    sbVideo.tooltip = videoState === 'recording' ? `${videoMessage}\nStop recording and save video`
+        : videoState === 'idle' ? 'Record device video (up to 3 minutes; physical iPhone requires USB)'
+        : `${videoMessage}${canCancelVideo ? '\nCancel recording' : ''}`;
+    sbVideo.accessibilityInformation = { label: videoMessage || 'Record device video' };
+    if (process.platform === 'darwin') { sbVideo.show(); }
 
     // ── Run button ──
     if (!isBuilding) {

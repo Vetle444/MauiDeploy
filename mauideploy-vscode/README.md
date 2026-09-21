@@ -8,6 +8,7 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 - Choose Debug or Release configuration from the status bar
 - Pick iOS simulators, paired iOS devices, or Android devices
 - Take device screenshots on macOS, open an in-memory preview, and automatically copy the image to the clipboard
+- Record native device video on macOS, preview it, and save an H.264 `.mp4` file
 - Build and deploy MAUI apps without leaving VS Code
 - Deploy a branch or GitHub PR from a reusable, isolated worktree while an agent keeps working in your checkout
 - Deploy MAUI apps from the existing `bin` output without rebuilding
@@ -31,6 +32,10 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 - `MAUI Deploy: Select Project`
 - `MAUI Deploy: Select Device`
 - `MAUI Deploy: Take Screenshot`
+- `MAUI Deploy: Record Video`
+- `MAUI Deploy: Stop Recording`
+- `MAUI Deploy: Cancel Recording`
+- `MAUI Deploy: Save Recording`
 - `MAUI Deploy: Toggle Configuration`
 - `MAUI Deploy: Ask Copilot to Fix Build Error`
 - `MAUI Deploy: Open Logs`
@@ -252,6 +257,67 @@ The helper is downloaded separately, not bundled in the VSIX:
 [uv source and licenses](https://github.com/astral-sh/uv).
 Screenshot capture/clipboard integration currently runs on a macOS extension
 host; Windows, Linux, and remote-host screenshot workflows are not supported.
+
+## Video Recordings (macOS)
+
+Click the record icon beside the screenshot camera, or run **MAUI Deploy: Record
+Video**, and choose a device. The selection does not change your Run/Debug target.
+This uses native video capture, not repeated screenshots or GIF encoding.
+
+A cancellable **MAUI Deploy: Record Video** notification appears immediately,
+including while devices are being discovered. It reports helper setup, USB or
+permission waits, capture startup, finalization, download, and saving. The status
+bar shows the current phase even when the notification is hidden.
+
+- **Physical iPhone:** connect by USB, unlock the phone, and trust this Mac.
+	Wi-Fi alone is not sufficient for this recording backend. A small bundled Swift
+	helper uses macOS AVFoundation and requests 30 FPS when the device supports it.
+	Actual frame rate and resolution depend on the device. Xcode 15 or newer is
+	required; the helper is compiled and cached in MAUI Deploy's private global
+	storage on first use. No iPhone app, WebDriverAgent, Python helper, or additional
+	downloads are required for video capture.
+- **iOS simulator:** uses Xcode's `simctl recordVideo` with H.264 on a booted simulator.
+- **Android device/emulator:** uses `adb shell screenrecord`, then pulls the MP4
+	and removes the temporary device recording. Authorized wireless ADB connections
+	also work; only physical-iPhone recording requires USB.
+
+macOS may ask for camera access for VS Code or MAUI Deploy Screen Recorder.
+Allow it in **System Settings > Privacy & Security > Camera** if needed. The
+helper matches the selected iPhone's device identifier and never falls back to
+the Mac camera or another phone. Audio is not recorded.
+
+When the selected iPhone is not available over USB, **Waiting for USB** remains
+visible for up to two minutes. Connect and unlock that phone and trust this Mac;
+capture continues automatically when it becomes available. A separate **Camera
+permission** state identifies a pending macOS access prompt. Neither state means
+video is already being recorded. Click the busy status-bar item, cancel the
+notification, or run **MAUI Deploy: Cancel Recording** to cancel preparation.
+
+The button becomes a red Stop icon with an elapsed timer only after capture
+starts. Click it again, or run
+**MAUI Deploy: Stop Recording**, to finalize the MP4. Recordings stop automatically
+after three minutes; local capture also has a 512 MiB size limit. Cancel in the
+progress notification stops capture and discards the unfinished recording.
+
+The video opens in a preview with playback controls, followed by a Save Video
+dialog. Choose a destination for the `.mp4` file. Cancelling the save dialog keeps
+the preview open. Use its Save icon or **MAUI Deploy: Save Recording** with the
+preview active to save later or retry a failed save. Videos are not copied to the
+clipboard. The screenshot button and its Wi-Fi/clipboard behavior are unchanged.
+After a successful local save, Finder opens with the saved video selected. If
+Finder cannot be opened, the video remains saved and a warning is shown.
+
+Completion feedback distinguishes saved video, an unsaved preview, cancellation,
+and failure. **MAUI Deploy - Recordings** in Output records stage changes and
+errors without logging video content or raw device diagnostics.
+
+Temporary video files live in a private directory under MAUI Deploy's global
+storage until you close the preview. Cancellation and failed capture remove local
+temporary files; saved copies remain at the destination you choose. Abruptly
+terminating VS Code may leave temporary files behind. An Android disconnection
+can prevent device-side cleanup; a warning identifies the temporary directory
+to remove after reconnecting. Record and share sensitive screens only where
+appropriate. Recording currently requires a local macOS extension host.
 
 ## Android Build Performance
 

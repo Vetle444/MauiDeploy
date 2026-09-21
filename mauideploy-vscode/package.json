@@ -2,7 +2,7 @@
   "name": "maui-deploy",
   "displayName": "MauiDeploy",
   "description": "Rider-like toolbar for building, deploying, and debugging with Hot-Reload in .NET MAUI apps",
-  "version": "1.6.3",
+  "version": "1.6.4",
   "author": "FinstadProductions",
   "publisher": "FinstadProductions",
   "license": "MIT",
@@ -148,6 +148,26 @@
         "icon": "$(device-camera)"
       },
       {
+        "command": "mauideploy.recordVideo",
+        "title": "MAUI Deploy: Record Video",
+        "icon": "$(record)"
+      },
+      {
+        "command": "mauideploy.stopRecording",
+        "title": "MAUI Deploy: Stop Recording",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mauideploy.cancelRecording",
+        "title": "MAUI Deploy: Cancel Recording",
+        "icon": "$(close)"
+      },
+      {
+        "command": "mauideploy.saveRecording",
+        "title": "MAUI Deploy: Save Recording",
+        "icon": "$(save)"
+      },
+      {
         "command": "mauideploy.run",
         "title": "MAUI Deploy: Run",
         "icon": "$(play)"
@@ -203,6 +223,15 @@
         "icon": "$(trash)"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "mauideploy.saveRecording",
+          "when": "activeWebviewPanelId == mauideploy.recording",
+          "group": "navigation"
+        }
+      ]
+    },
     "keybindings": [
       {
         "command": "mauideploy.run",
