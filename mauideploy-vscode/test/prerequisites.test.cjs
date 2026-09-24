@@ -342,6 +342,9 @@ function setupHarness(context) {
                     }
                 };
             }
+            if (name === './toolPicker') {
+                return { showToolQuickPick: (...args) => sandbox.require('vscode').window.showQuickPick(...args) };
+            }
             return localRequire(name);
         }
     };

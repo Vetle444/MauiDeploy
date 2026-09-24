@@ -13,7 +13,7 @@ let execute;
 const fakeExecFile = () => {};
 fakeExecFile[promisify.custom] = (...args) => execute(...args);
 childProcess.execFile = fakeExecFile;
-const { captureVideo, createUsbScreenSelection, prepareVideoHelper, videoDurationLimitMs } = require('../out/recordings');
+const { captureVideo, createUsbScreenSelection, prepareVideoHelper, validateVideoRecording, videoDurationLimitMs } = require('../out/recordings');
 const { openLivePreview, prepareScrcpy } = require('../out/livePreview');
 childProcess.execFile = actualExecFile;
 
@@ -409,6 +409,66 @@ test('Android cancellation skips download and failed downloads still remove devi
         assert.deepEqual(fs.readdirSync(directory), []);
         context.mock.restoreAll();
     }
+});
+
+test('native movie finalization exports a synthetic MP4 without synchronously stopping the capture session', { skip: process.platform !== 'darwin' }, async context => {
+    const { directory, options } = fixture(context);
+    const source = fs.readFileSync(path.join(options.extensionPath, 'native', 'ScreenRecorder.swift'), 'utf8');
+    const start = source.indexOf('final class ScreenRecorder:');
+    const end = source.indexOf('let arguments = CommandLine.arguments');
+    assert.ok(start > 0 && end > start);
+    const recorderSource = source.slice(start, end).replace('private let session = AVCaptureSession()', 'private let session = StopSensitiveSession()');
+    assert.notEqual(recorderSource, source.slice(start, end));
+    const harness = source.slice(0, start) + `
+final class StopSensitiveSession: AVCaptureSession {
+    override func stopRunning() { fail("SESSION_STOP_BEFORE_EXPORT") }
+}
+` + recorderSource + `
+let destination = URL(fileURLWithPath: CommandLine.arguments[1])
+let movie = destination.deletingPathExtension().appendingPathExtension("mov")
+let recorder = ScreenRecorder(destination: destination)
+let writer = try AVAssetWriter(outputURL: movie, fileType: .mov)
+let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+    AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 64, AVVideoHeightKey: 64
+])
+let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input)
+writer.add(input)
+guard writer.startWriting() else { fail("SYNTHETIC_WRITER_FAILED") }
+writer.startSession(atSourceTime: .zero)
+var frameIndex: Int64 = 0
+input.requestMediaDataWhenReady(on: DispatchQueue(label: "synthetic-frames")) {
+    while input.isReadyForMoreMediaData && frameIndex < 3 {
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32ARGB, nil, &buffer) == kCVReturnSuccess,
+              let pixels = buffer else { fail("SYNTHETIC_BUFFER_FAILED") }
+        CVPixelBufferLockBaseAddress(pixels, [])
+        memset(CVPixelBufferGetBaseAddress(pixels), 120, CVPixelBufferGetDataSize(pixels))
+        CVPixelBufferUnlockBaseAddress(pixels, [])
+        guard adaptor.append(pixels, withPresentationTime: CMTime(value: frameIndex, timescale: 30)) else { fail("SYNTHETIC_APPEND_FAILED") }
+        frameIndex += 1
+    }
+    if frameIndex == 3 {
+        frameIndex += 1
+        input.markAsFinished()
+        writer.finishWriting {
+            guard writer.status == .completed else { fail("SYNTHETIC_MOVIE_FAILED") }
+            recorder.fileOutput(AVCaptureMovieFileOutput(), didFinishRecordingTo: movie, from: [], error: nil)
+        }
+    }
+}
+RunLoop.main.run()
+`;
+    const filename = path.join(directory, 'Finalization.swift');
+    const executable = path.join(directory, 'Finalization');
+    const output = path.join(directory, 'synthetic.mp4');
+    fs.writeFileSync(filename, harness);
+    const actualExecute = promisify(actualExecFile);
+    await actualExecute('xcrun', ['swiftc', '-swift-version', '5', '-O', filename, '-o', executable], { timeout: 120_000 });
+    const { stdout } = await actualExecute(executable, [output], { timeout: 15_000 });
+    const events = stdout.trim().split('\n').map(line => JSON.parse(line).event);
+    assert.deepEqual(events, ['finalizing', 'finished']);
+    assert.equal(fs.existsSync(path.join(directory, 'synthetic.mov')), false);
+    await validateVideoRecording(output);
 });
 
 test('native helper builds with usage metadata, caches, lists screen sources and handles early Stop', { skip: process.platform !== 'darwin' }, async context => {

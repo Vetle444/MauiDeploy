@@ -18,12 +18,14 @@ cd MauiDeploy.Debugger
 dotnet publish -c Release -o ../mauideploy-vscode/out/debugger/
 ```
 
-Compile the VS Code extension:
+Compile the VS Code extension and its webviews:
 
 ```bash
 cd ../mauideploy-vscode
-npm install
+npm ci
+npm --prefix memory-inspector ci
 npm run compile
+npm run build:memory
 ```
 
 Package the extension:
@@ -42,6 +44,7 @@ Reload VS Code after installing the VSIX.
 
 ## Requirements
 
+- Node.js 22.12+ for building and packaging the extension
 - .NET SDK for the MAUI app target frameworks
 - Xcode command line tools for iOS simulator and physical iOS deployment
 - Android SDK platform tools for Android deployment

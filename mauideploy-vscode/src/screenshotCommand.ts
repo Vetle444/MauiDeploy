@@ -7,6 +7,8 @@ import { captureScreenshot, copyScreenshot } from './screenshots';
 import { captureVideo, RecordingError, UsbScreenSource, VideoCaptureStage, VideoRecording, videoCaptureMessages, videoDurationLimitMs } from './recordings';
 import { LivePreviewError, LivePreviewState, livePreviewMessages, openLivePreview } from './livePreview';
 import { installScreenshotTools, screenshotPythonPath, screenshotToolsReady } from './screenshotTools';
+import { withToolProgress } from './toolProgress';
+import { showToolQuickPick } from './toolPicker';
 
 export type VideoRecordingState = VideoCaptureStage | 'idle' | 'findingDevices' | 'choosingDevice' | 'preparing'
     | 'recording' | 'finalizing' | 'previewing' | 'saving' | 'cancelling';
@@ -144,7 +146,7 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
             if (state === 'live' || state === 'simulatorOpened') { started = true; completeStartup(); }
         };
         try {
-            await vscode.window.withProgress({
+            await withToolProgress({
                 location: vscode.ProgressLocation.Notification, title: 'MAUI Deploy: Live Device Preview', cancellable: true,
             }, async (notification, token) => {
                 progress = notification;
@@ -171,7 +173,7 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
                             setBusy(true);
                             screenshotOutput.appendLine('Screenshot requested from live preview.');
                             try {
-                                const copied = await vscode.window.withProgress({
+                                const copied = await withToolProgress({
                                     location: vscode.ProgressLocation.Notification, title: `Screenshot: ${device.name}`, cancellable: true,
                                 }, async (notification, token) => {
                                     const subscription = token.onCancellationRequested(cancel);
@@ -191,7 +193,7 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
                             operation.signal.throwIfAborted();
                             await showRecording(video, device.name);
                             try {
-                                await vscode.window.withProgress({
+                                await withToolProgress({
                                     location: vscode.ProgressLocation.Notification, title: 'MAUI Deploy: Save Recording', cancellable: false,
                                 }, notification => saveVideo(video, undefined, message => notification.report({ message })));
                             } catch {
@@ -261,7 +263,7 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
         const video = [...recordings].find(([panel]) => panel.active)?.[1];
         if (!video) { return; }
         try {
-            await vscode.window.withProgress({
+            await withToolProgress({
                 location: vscode.ProgressLocation.Notification, title: 'MAUI Deploy: Save Recording', cancellable: false,
             }, progress => saveVideo(video, undefined, message => progress.report({ message })));
         } catch {
@@ -389,14 +391,14 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
             if (kind === 'video') {
                 await captureDevice(videoProgress!, videoCancellation!);
             } else {
-                await vscode.window.withProgress({
+                await withToolProgress({
                     location: vscode.ProgressLocation.Notification, title: `${label}: ${device.name}`, cancellable: true,
                 }, captureDevice);
             }
         };
         try {
             if (kind === 'video') {
-                await vscode.window.withProgress({
+                await withToolProgress({
                     location: vscode.ProgressLocation.Notification, title: 'MAUI Deploy: Record Video', cancellable: true,
                 }, async (progress, cancellation) => {
                     videoProgress = progress;
@@ -418,11 +420,11 @@ export function registerScreenshotCommand(context: vscode.ExtensionContext, sele
                 await performCapture();
             }
         } catch (error) {
-            completionMessage = previewReady ? 'Recording ready, but saving failed.' : 'Recording failed.';
-            const failure = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
-            const details = `code=${failure?.code ?? 'none'}, name=${failure?.name ?? 'unknown'}, killed=${!!failure?.killed}, signal=${failure?.signal ?? 'none'}`;
-            output.appendLine(`Failed to ${stage}: ${details}`);
             if (!signal.aborted) {
+                completionMessage = previewReady ? 'Recording ready, but saving failed.' : 'Recording failed.';
+                const failure = error as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
+                const details = `code=${failure?.code ?? 'none'}, name=${failure?.name ?? 'unknown'}, killed=${!!failure?.killed}, signal=${failure?.signal ?? 'none'}`;
+                output.appendLine(`Failed to ${stage}: ${details}`);
                 const code = (error as NodeJS.ErrnoException)?.code;
                 let action = 'Check that the device is reachable and unlocked, then try again.';
                 if (error instanceof RecordingError) {
@@ -475,7 +477,7 @@ async function chooseUsbScreen(device: Device, sources: UsbScreenSource[], signa
         const items = sources.map(source => ({
             label: `$(device-mobile) ${source.name}`, description: `USB screen - ${source.id.slice(-8)}`, screenId: source.id,
         }));
-        const choice = await vscode.window.showQuickPick(items, {
+        const choice = await showToolQuickPick(items, {
             title: `USB Screen - ${device.name}`, placeHolder: 'Confirm the connected iPhone screen',
             matchOnDescription: true, ignoreFocusOut: true,
         }, cancellation.token);
@@ -489,7 +491,7 @@ async function chooseUsbScreen(device: Device, sources: UsbScreenSource[], signa
 
 async function chooseScreenshotDevice(selectedId?: string, title = 'Take Screenshot', cancellation?: vscode.CancellationToken,
     onChoosing?: () => void): Promise<Device | undefined> {
-    const devices = cancellation ? await detectScreenshotDevices() : await vscode.window.withProgress({
+    const devices = cancellation ? await detectScreenshotDevices() : await withToolProgress({
         location: vscode.ProgressLocation.Window, title: 'Finding screenshot devices...',
     }, () => detectScreenshotDevices());
     if (cancellation?.isCancellationRequested) { return undefined; }
@@ -523,7 +525,7 @@ async function chooseScreenshotDevice(selectedId?: string, title = 'Take Screens
         }
     }
     onChoosing?.();
-    const choice = await vscode.window.showQuickPick(items, { title, placeHolder: 'Select a device', matchOnDescription: true }, cancellation);
+    const choice = await showToolQuickPick(items, { title, placeHolder: 'Select a device', matchOnDescription: true }, cancellation);
     return choice?.device;
 }
 
@@ -536,7 +538,7 @@ async function prepareIphoneHelper(storage: string, signal: AbortSignal, cancel:
         install,
     );
     if (choice !== install || signal.aborted) { return undefined; }
-    return vscode.window.withProgress({
+    return withToolProgress({
         location: vscode.ProgressLocation.Notification, title: 'Installing iPhone screenshot tools', cancellable: true,
     }, async (progress, cancellation) => {
         const subscription = cancellation.onCancellationRequested(cancel);

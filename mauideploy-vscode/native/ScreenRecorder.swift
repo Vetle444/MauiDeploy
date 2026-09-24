@@ -638,7 +638,6 @@ final class ScreenRecorder: NSObject, DeviceCapture, AVCaptureFileOutputRecordin
     func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo fileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
         DispatchQueue.main.async {
             self.exporting = true
-            self.session.stopRunning()
             if let failure = error as NSError?,
                failure.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool != true {
                 fail("RECORDING_FAILED")

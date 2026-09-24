@@ -1,6 +1,7 @@
 .vscode/**
 src/**
 test/**
+memory-inspector/**
 node_modules/**
 *.vsix
 tsconfig.json

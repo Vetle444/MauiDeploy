@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { Platform } from './devices';
+import { showToolQuickPick } from './toolPicker';
 import {
     inspectGitPrerequisites, inspectGitHubPrerequisites, inspectXcodePrerequisites,
     inspectIosSdkPrerequisites, installPrerequisite, PrerequisiteIssue, PrerequisiteCommand
@@ -88,7 +89,7 @@ export class BranchPrerequisites {
             actions.push({ label: '$(refresh) Recheck prerequisites', action: 'recheck' });
             if (alternative) { actions.push({ label: `$(device-mobile) ${alternative}`, action: 'alternative' }); }
             this.report(`${title}: action required`);
-            const selection = await vscode.window.showQuickPick(actions, {
+            const selection = await showToolQuickPick(actions, {
                 title: `MAUI Deploy: ${title}`, placeHolder: issues.map(issue => issue.title).join(' / '),
                 matchOnDescription: true, ignoreFocusOut: true
             }, this.token);

@@ -1,34 +1,61 @@
 # MAUI Deploy
 
-MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debugging .NET MAUI apps on iOS and Android devices.
+MAUI Deploy adds a local tools sidebar for building, deploying, debugging and inspecting .NET MAUI apps on iOS and Android devices. The status bar keeps Run, the project picker, the device picker and one MAUI Deploy button.
+
+## Tools Sidebar
+
+Click the **MAUI Deploy** activity-bar icon or status-bar button, or run
+**MAUI Deploy: Open Tools**. Tools open in the sidebar rather than an editor tab.
+The webview follows the VS Code theme and groups existing commands into Build &
+Deploy, Device & Capture, Inspect and Workspace. Project, device and Debug/Release
+configuration are at the top; Run, project and device selection also remain in the status bar.
+
+Build progress, recording state and live-preview state are synchronized with the
+extension. The Run position becomes Stop during a build, deployment or test;
+the sidebar also offers Stop. Recording and live preview have their own stop
+controls. Hiding the sidebar does not stop work or discard diagnostic panels.
+All commands remain available from the command palette. Device previews,
+screenshots and diagnostics open in their existing dedicated views.
+
+Operations started while the sidebar is visible show progress and cancellation
+there instead of a duplicate VS Code progress notification. If the sidebar is
+hidden when an operation starts, native progress remains available. Project,
+device, branch/PR, test, capture and setup choices open inside the sidebar, with
+search, keyboard navigation and multiple selection where needed. Status-bar and
+command-palette choices open the same sidebar. File browse/save dialogs, errors
+and consent confirmations remain native.
+
+The tools sidebar loads only bundled local assets. It has no telemetry or network
+access; actions delegate to the existing commands, which may access devices, Git
+remotes or build services as before. Workspace trust and existing confirmations
+still apply.
 
 ## Features
 
 - Select a MAUI project from the current workspace
-- Choose Debug or Release configuration from the status bar
+- Choose Debug or Release configuration in the tools sidebar
 - Pick iOS simulators, paired iOS devices, or Android devices
 - Take device screenshots on macOS, open an in-memory preview, and automatically copy the image to the clipboard
-- Record native device video on macOS, preview it, and save an H.264 `.mp4` file
-- Open a live device window for screen sharing in Teams, Slack, or Zoom
+- Record silent MP4 video and open a live device preview on macOS
+- Inspect DUI GC checks from the selected app/device or exported files, with a compact summary, timeline, direct refresh and event details
 - Build and deploy MAUI apps without leaving VS Code
-- Deploy a branch or GitHub PR from a reusable, isolated worktree while an agent keeps working in your checkout
+- Deploy a branch or GitHub/GitHub Enterprise PR in an isolated worktree without changing your checkout
 - Deploy MAUI apps from the existing `bin` output without rebuilding
 - Debug MAUI apps with the bundled Mono SDB adapter and experimental XAML Hot Reload on save
-- Start a Debug-only experimental `dotnet watch` rebuild/rerun watcher from the status bar
-- Pick a `.csproj` from the toolbar and run it with `dotnet test`, using `-c Test` when the project declares a Test configuration
+- Pick a `.csproj` from Run Tests and run it with `dotnet test`, using `-c Test` when the project declares a Test configuration
 - Ask Copilot to fix captured build errors directly from the build failure notification
 - Start a bundled Mono SDB debug adapter for C# debugging
 - Open MAUI Deploy logs from the command palette
 
 ## Commands
 
+- `MAUI Deploy: Open Tools`
 - `MAUI Deploy: Run`
 - `MAUI Deploy: Deploy Branch or PR`
 - `MAUI Deploy: Set Up Branch Deployment`
+- `MAUI Deploy: Run Multiple Targets`
 - `MAUI Deploy: Deploy from Bin`
 - `MAUI Deploy: Debug`
-- `MAUI Deploy: Watch Run (Experimental)`
-- `MAUI Deploy: Stop Watch Run`
 - `MAUI Deploy: Run Tests`
 - `MAUI Deploy: Select Project`
 - `MAUI Deploy: Select Device`
@@ -39,203 +66,39 @@ MAUI Deploy adds a compact VS Code toolbar for building, deploying, and debuggin
 - `MAUI Deploy: Save Recording`
 - `MAUI Deploy: Live Device Preview`
 - `MAUI Deploy: Stop Live Device Preview`
+- `MAUI Deploy: DUI Memory Diagnostics`
 - `MAUI Deploy: Toggle Configuration`
 - `MAUI Deploy: Ask Copilot to Fix Build Error`
-- `MAUI Deploy: Open Logs`
+- `MAUI Deploy: Open Output`
+- `MAUI Deploy: Open Terminal`
+- `MAUI Deploy: Settings`
 
-## Branch And PR Deployment
+## DUI Memory Diagnostics
 
-After installing or updating the extension, reload VS Code. The first **Deploy
-Branch** click or PR link automatically opens VS Code's native selection menus if that repository
-has no saved profile. For a PR link, MauiDeploy uses a matching open repository;
-otherwise it asks you to select an existing local clone. Only remotes matching
-the PR repository are available during that setup. It does not clone a repository
-automatically.
+Open **DUI memory diagnostics** in the tools sidebar or **MAUI Deploy: DUI Memory Diagnostics** in the command palette.
+In a trusted workspace, the panel automatically reads existing diagnostics from
+the selected project and device. The app must have generated DUI GC checks in
+Debug; the importer does not build or modify it. iOS uses Xcode tools and the
+selected build's app ID; Android uses `adb run-as`. Use **Refresh** beside Summary
+and Checks to reread the selected app/device's JSONL files with one click.
 
-Setup selects a Git remote and tracked MAUI project. Single remote/project choices
-are automatic. All branch/PR builds use **Debug**; there is no configuration or PR
-permissions menu. Previously saved Release and permission choices no longer affect
-deployment. Cancelling any menu leaves the existing profile unchanged. After setup,
-the original PR continues without another link click.
+Manual import remains available under Files: export `checks-*.jsonl`, their
+`.previous.jsonl` copies or legacy `checks.jsonl` / `checks.previous.jsonl` from
+the sandbox, then select or drop them together. Manual reload replaces only that
+filename; device reload replaces the whole snapshot. Invalid lines and unknown
+schema versions are counted and skipped; repeated checks remain separate events.
+For manually imported files, **Refresh** opens the file picker for updated exports.
 
-The project picker only lists projects inside the selected repository. A PR link
-selects its repository; the toolbar and setup command start from the ordinary selected
-project, or the open workspace folders when no project is selected. Projects in other
-local clones are not included. Use a PR link for the intended repository or select
-its project in the ordinary project picker before starting branch deployment.
-
-**Choose a device before every branch or PR deployment**, including when only one
-device is available. The picker lists compatible iOS and Android targets for the
-selected branch. The last used device appears first, but always requires selection.
-Cancelling the picker stops before build, install or launch and preserves the last
-device. The project and last used device are remembered separately from ordinary
-Run/Debug selections, including their Debug/Release setting, which are unchanged.
-
-To configure ahead of time or change the saved settings, use **MAUI Deploy: Set Up
-Branch Deployment** in the command palette. It opens the same native menus without
-starting a deployment. As an optional terminal alternative, open a **new integrated
-terminal** in your MAUI application repository and run:
-
-```sh
-mauideploy setup
-```
-
-Both setup interfaces use the same validation and store settings locally per
-repository under `~/.mauideploy/branch-deploy/`. Neither setup asks for a device;
-that choice belongs to each deployment. No project files are changed. The optional
-terminal command uses VS Code's bundled runtime; a global Node installation is not
-required. It is available in new VS Code terminals, not globally in other shells.
-
-Click **Deploy Branch** in the status bar, search for a branch, and press Enter.
-Remote and local branches are distinguished, and the last selection appears first.
-Local branches remain available when the remote is offline. You can also paste an
-HTTPS GitHub or GitHub Enterprise PR URL. Every ordinary button click requires a
-branch/PR selection followed by a device selection. The project menu is only needed
-during setup. Missing projects or no available compatible devices
-stop with an error instead of silently selecting something else.
-
-MauiDeploy creates a sibling `<repository>-mauideploy` worktree with detached HEAD
-at the selected commit. It reuses that directory and ignored build output on later
-deployments. Submodules are initialized from that commit. The original branch,
-index, uncommitted files, `FETCH_HEAD`, and remote-tracking branches are preserved.
-Local branch deployments include committed changes only. PR deployments use the
-PR head, not GitHub's synthetic merge commit, and reject a PR that changes during fetch.
-Build terminals run in the worktree project's directory so its `global.json` and
-normal SDK discovery apply.
-
-Only one MauiDeploy operation may use a repository's deployment worktree at a time,
-including across VS Code windows. A dirty, repurposed, or unmanaged worktree is never
-reset, cleaned, or overwritten. A crash can leave `mauideploy.lock` in the repository's
-Git common directory; remove it only after confirming no deployment is still running.
-Stop an active MAUI debug session before deploying another branch from that window.
-
-If **MauiDeploy is already using this repository** appears, first check other VS
-Code windows for an active branch/PR deployment and let it finish or stop it. The
-lock is shared by all windows using that repository; it is unrelated to live
-preview or scrcpy. The current lock check tests file existence, not whether its
-recorded process is still alive. An abrupt extension-host crash or window reload
-can therefore leave a stale lock. To recover, stop all deployments and close their
-build/debug terminals first, confirming that no related build process remains.
-Then remove only the lock file at the exact path in the message and retry. Do not
-delete the Git directory or deployment worktree, and do not remove an active lock.
-
-Worktrees isolate normal source and `bin`/`obj` output, **not the device or app data**.
-Deploying the same application ID replaces the installed app. Custom absolute output
-paths and references outside the repository are not isolated by Git. Ignored local
-configuration and signing files are not copied from the development checkout.
-
-### Dependency Checks (macOS/iOS)
-
-Branch/PR deployment checks prerequisites before the stage that needs them:
-
-- Git before repository selection or worktree creation.
-- GitHub CLI and sign-in to the PR's exact host before PR lookup/fetch. Local branch
-	deployment does not require GitHub CLI. Git still uses its existing credentials.
-- Full selected Xcode, completed first-use setup, `simctl`, `devicectl` and the iOS
-	SDK before iOS device discovery. Missing Xcode does not force Android users to
-	install it: a multi-platform project can continue with Android for that deployment.
-- A .NET SDK resolved by `dotnet --version` from the **worktree project's directory**,
-	followed by that SDK's installed MAUI iOS workloads, before any iOS build.
-
-Missing prerequisites open a native menu with installation, setup instructions and
-**Recheck** actions. Installation requires explicit confirmation. After installation
-or a successful sign-in, the checks run again and the same deployment continues.
-Closing the menu, declining installation or stopping the operation never starts a
-build. Device selection remains mandatory for every deployment.
-
-On macOS, missing Git or `gh` can be installed using existing Homebrew. Homebrew itself
-is not installed automatically. GitHub sign-in runs in a dedicated user-operated
-terminal; passwords, tokens and authentication output are not read into diagnostics.
-The extension does not configure Git credentials or SSH keys.
-
-Missing SDKs use Microsoft's official HTTPS `dotnet-install.sh` installer in private
-extension storage (`prerequisites/dotnet/`). The requested version is installed beside
-existing SDKs; when there is no pinned SDK, the target framework's SDK channel is used.
-A staging installation must resolve successfully in the worktree before activation.
-Neither `global.json`, the original repository, nor the system's .NET installation
-or global PATH is rewritten. The selected executable is used explicitly for restore,
-registrar clean and build. A private installed SDK takes priority on later deployments
-for the same SDK requirement.
-
-If MAUI iOS workloads are missing, MauiDeploy can install `maui-ios` with the selected
-SDK using `--skip-manifest-update`. Administrator-managed SDKs offer a private copy
-first instead of invoking `sudo`. Installations are serialized across VS Code windows;
-cancellation stops the owned installer process group and removes incomplete SDK
-staging. A crash may leave `prerequisites/install.lock`; remove it only after confirming
-that no dependency installation is still running. Downloads can require substantial
-disk space and network access. Existing managed SDK directories are not overwritten.
-
-Xcode installation/selection, license acceptance, simulator runtimes, physical-device
-pairing/Developer Mode, signing identities, private NuGet access and corporate network
-requirements remain user-managed. The preflight checks basic Xcode readiness; exact
-Xcode/workload-version compatibility and project-specific requirements are still
-validated by the normal build. Ambiguous SDK configuration (for example custom SDK
-search paths or a configuration file the installer cannot parse) gets manual guidance
-instead of a guessed installation. No automatic SDK-policy or workload upgrade occurs.
-
-This first preflight version covers macOS/iOS branch and PR deployment and native
-branch setup. Ordinary Run/Debug and the optional terminal setup command retain their
-existing behavior. Automatic Android JDK/SDK setup and remote extension hosts are not
-covered. VS Code's bundled runtime runs the extension and CLI; users need no separate
-Node/npm installation, C# Dev Kit or separately installed MauiDeploy debug adapter.
-
-### PR Links
-
-GitHub CLI (`gh`) must be installed and authenticated for the repository's host;
-Git uses your existing remote credentials. The workspace must be trusted, and a device
-must be selected for every deployment. Same-repository PRs need no additional build
-confirmation. Fork PRs still require explicit confirmation because restore/build can
-execute code locally. A worktree is not a security sandbox; only deploy code you trust.
-
-Generate Markdown for a PR description or comment:
-
-```sh
-mauideploy pr-link https://github.com/owner/repository/pull/123
-```
-
-The command prints two Markdown links. **Test with MauiDeploy** uses Microsoft's
-existing `https://vscode.dev/redirect` service, which responds with HTTP 302 directly
-to VS Code instead of loading a launcher page. A manual Safari test confirmed that
-the original PR tab remains visible when accepting or cancelling the editor-opening
-prompt. The browser or OS can still require confirmation or block the protocol.
-Other browsers and policies, and machines without VS Code, need separate verification.
-
-**Problems opening?** opens the Pages fallback at
-`https://vetle444.github.io/MauiDeploy/deploy/`. It retains a manual editor-opening
-link and a **Tilbake til PR** link even if protocol opening is denied. Returning to
-the PR requires one click and opens the PR in a new tab, preserving the fallback.
-There is no automatic return, popup creation or timeout-based success detection.
-The fallback itself is a regular web page and may replace the current tab; use
-Cmd/Ctrl-click or middle-click to open it in another tab from the start.
-
-New direct links require **MauiDeploy 1.6.1 or newer**. Old
-Pages links remain accepted, but do not acquire the new tab-preserving behavior;
-regenerate existing PR comments or their workflow with the new primary URL format.
-For the direct link, the only query parameter sent to Microsoft is the fixed VS Code
-extension target. Repo and PR identifiers stay in the fragment, which the browser
-inherits on the redirect. The extension validates both the fixed target and the PR
-parameters. No tokens or local paths are included, and no GHE access is granted to
-the redirect service.
-
-MauiDeploy finds the configured local repository, fetches the PR and prepares its
-worktree. After you select a device, Debug build, install and launch proceed
-automatically for a same-repository PR. If multiple clones are configured for the
-same remote, you choose the clone. Setup and device selection remain in VS Code.
-
-Application repositories do not need their own web service or Pages setup. The
-fallback source is in `docs/deploy/`; maintainers update it with **Publish PR Deploy
-Link Page**. To avoid the Microsoft redirect or use a self-hosted launcher, pass
-`--bridge https://your-host/deploy/`: this explicitly retains the original single
-Pages-style link, with no automatic new-tab guarantee. Add `--insiders` for VS Code
-Insiders in either mode.
-
-You can also paste an ordinary PR URL directly into the branch picker.
-Branch/PR deployment currently targets local desktop VS Code with the normal MAUI
-toolchain and device prerequisites; remote extension hosts have not been verified.
+`alive: true` means something survived GC, not a proven leak. The format has no
+stable object IDs or reference chains. Processing stays in memory with no upload,
+telemetry or permanent storage. Temporary physical-iOS copies are removed after
+reading or cancellation. Closing the panel clears its session.
+See [the development guide](https://github.com/Vetle444/MauiDeploy/blob/main/mauideploy-vscode/memory-inspector/README.md) for the standalone browser
+view, tests and packaging instructions.
 
 ## Screenshots (macOS)
 
-Click the camera in the status bar or run **MAUI Deploy: Take Screenshot**.
+Click **Take screenshot** in the tools sidebar or run **MAUI Deploy: Take Screenshot**.
 Choose an available phone or a running simulator/emulator. The current deployment
 target appears first, but the screenshot selection does not change your Run/Debug
 target. No build or active debugger is required.
@@ -250,13 +113,12 @@ Capture and paste sensitive screens only where appropriate.
 - **iOS Simulator:** uses Xcode's `simctl` and requires a booted simulator.
 - **Android devices/emulators:** uses the Android SDK's `adb`; the device must
 	be connected and authorized.
-- **Physical iPhone:** uses the external `pymobiledevice3` helper. USB capture
-	uses its automatic connection selection so it can fall back when Apple's native
-	tunnel is unavailable; Wi-Fi capture retains native macOS tunnel discovery.
-	The phone must be paired, reachable, and configured for development. Wi-Fi
-	capture is verified on iPhone 15 Pro / iOS 26.6.1, and USB PNG capture has also
-	been verified on a connected iPhone. Other iOS/macOS combinations still need
-	hardware verification.
+- **Physical iPhone:** uses the external `pymobiledevice3` helper. USB uses
+	automatic connection selection so it can fall back when Apple's native tunnel
+	is unavailable; Wi-Fi retains native macOS tunnel discovery. The phone must be
+	paired, reachable and configured for development. Wi-Fi and USB PNG capture
+	have been verified on a physical iPhone; other iOS/macOS combinations still
+	need hardware verification.
 
 The first physical-iPhone capture asks permission to install the helper. MAUI
 Deploy uses Xcode's available `python3` to bootstrap `uv` 0.12.13, then installs
@@ -275,130 +137,130 @@ host; Windows, Linux, and remote-host screenshot workflows are not supported.
 
 ## Video Recordings (macOS)
 
-Click the record icon beside the screenshot camera, or run **MAUI Deploy: Record
-Video**, and choose a device. The selection does not change your Run/Debug target.
-This uses native video capture, not repeated screenshots or GIF encoding.
+Choose **Record video** in the tools sidebar or run **MAUI Deploy: Record Video**.
+Device selection is independent of your Run/Debug target. Progress appears in the
+visible sidebar, with native progress available when the sidebar starts hidden.
+Helper setup, USB/permission waits, recording time, finalization and saving have
+separate states. Only the recording state means capture has started.
 
-A cancellable **MAUI Deploy: Record Video** notification appears immediately,
-including while devices are being discovered. It reports helper setup, USB or
-permission waits, capture startup, finalization, download, and saving. The status
-bar shows the current phase even when the notification is hidden.
+- **Physical iPhone:** requires USB, a paired and unlocked phone, and Xcode 15+.
+	A bundled Swift AVFoundation helper is compiled into private extension storage
+	on first use. It requests 30 FPS when supported; actual frame rate depends on
+	the device. No Python helper, on-device app or encoder download is needed.
+- **iOS simulator:** uses `simctl recordVideo` with H.264 on a booted simulator.
+- **Android device/emulator:** uses `adb shell screenrecord`, downloads the MP4,
+	then removes the temporary device recording. Authorized wireless ADB is supported.
 
-- **Physical iPhone:** connect by USB, unlock the phone, and trust this Mac.
-	Wi-Fi alone is not sufficient for this recording backend. A small bundled Swift
-	helper uses macOS AVFoundation and requests 30 FPS when the device supports it.
-	Actual frame rate and resolution depend on the device. Xcode 15 or newer is
-	required; the helper is compiled and cached in MAUI Deploy's private global
-	storage on first use. No iPhone app, WebDriverAgent, Python helper, or additional
-	downloads are required for video capture.
-- **iOS simulator:** uses Xcode's `simctl recordVideo` with H.264 on a booted simulator.
-- **Android device/emulator:** uses `adb shell screenrecord`, then pulls the MP4
-	and removes the temporary device recording. Authorized wireless ADB connections
-	also work; only physical-iPhone recording requires USB.
+macOS may request camera access for VS Code or MAUI Deploy Screen Recorder. The
+helper uses USB screen sources, never the Mac camera. With one verified wired
+iPhone and one screen source, selection is automatic; ambiguous connections open
+a **USB Screen** choice in the sidebar. Discovery and recording use the same
+native process. USB and camera-permission waits remain cancellable.
 
-macOS may ask for camera access for VS Code or MAUI Deploy Screen Recorder.
-Allow it in **System Settings > Privacy & Security > Camera** if needed. The
-helper uses only USB screen sources, never the Mac camera. macOS can give a screen
-a different identifier from the phone's deployment UDID. When the selected iPhone
-is the only phone connected by USB and one screen source is available, MauiDeploy
-selects it automatically. A **USB Screen** picker appears only when the choice is
-ambiguous or the USB connection cannot be verified. Discovery, selection, and
-capture stay in the same native process so the selected screen remains available.
-Audio is not recorded.
+**Stop recording** finalizes the MP4; **Cancel Recording** discards the capture.
+Recordings are silent and stop automatically after three minutes, with a 512 MiB
+local size limit. The MP4 opens in a playback tab followed by a Save Video dialog.
+Declining the save leaves the preview available. Its Save action, or **MAUI Deploy:
+Save Recording**, retries later. Successful local saves reveal the file in Finder;
+a Finder failure does not delete the saved video. Videos are not copied to the clipboard.
 
-When the selected iPhone is not available over USB, **Waiting for USB** remains
-visible for up to two minutes. Connect and unlock that phone and trust this Mac,
-then confirm its USB screen if prompted. A separate **Camera
-permission** state identifies a pending macOS access prompt. Neither state means
-video is already being recorded. Click the busy status-bar item, cancel the
-notification, or run **MAUI Deploy: Cancel Recording** to cancel preparation.
-
-The button becomes a red Stop icon with an elapsed timer only after capture
-starts. Click it again, or run
-**MAUI Deploy: Stop Recording**, to finalize the MP4. Recordings stop automatically
-after three minutes; local capture also has a 512 MiB size limit. Cancel in the
-progress notification stops capture and discards the unfinished recording.
-
-The video opens in a preview with playback controls, followed by a Save Video
-dialog. Choose a destination for the `.mp4` file. Cancelling the save dialog keeps
-the preview open. Use its Save icon or **MAUI Deploy: Save Recording** with the
-preview active to save later or retry a failed save. Videos are not copied to the
-clipboard. The screenshot button and its Wi-Fi/clipboard behavior are unchanged.
-After a successful local save, Finder opens with the saved video selected. If
-Finder cannot be opened, the video remains saved and a warning is shown.
-
-Completion feedback distinguishes saved video, an unsaved preview, cancellation,
-and failure. **MAUI Deploy - Recordings** in Output records stage changes and
-errors without logging video content or raw device diagnostics.
-
-Temporary video files live in a private directory under MAUI Deploy's global
-storage until you close the preview. Cancellation and failed capture remove local
-temporary files; saved copies remain at the destination you choose. Abruptly
-terminating VS Code may leave temporary files behind. An Android disconnection
-can prevent device-side cleanup; a warning identifies the temporary directory
-to remove after reconnecting. Record and share sensitive screens only where
-appropriate. Recording currently requires a local macOS extension host.
+Closing the preview removes its private temporary video. Failed or cancelled
+captures are cleaned up; saved copies remain where you chose. An Android
+disconnection can prevent device-side cleanup and produces a warning. Abruptly
+terminating VS Code can leave temporary files behind. **MAUI Deploy - Recordings**
+in Output reports stages and errors without logging video contents.
 
 ## Live Device Preview (macOS)
 
-Click the monitor icon beside the recording button, or run **MAUI Deploy: Live
-Device Preview**, and choose a device. Then select the **MAUI Deploy - device
-name** window in your meeting app's window-sharing picker. For an iOS simulator,
-select its Simulator window instead. MauiDeploy opens the local preview; your
-meeting app handles broadcasting. It does not start a call or upload video.
+Choose **Live device preview** in the tools sidebar. The preview opens separately;
+select that window in your meeting app to share it. MauiDeploy does not broadcast,
+upload or start a meeting. Previewing alone saves no files and captures no audio.
 
-- **Physical iPhone:** uses native USB video, the same automatic screen selection
-	and macOS camera permission as recording. Connect, unlock, and trust the phone.
-	A second screen picker is needed only when the source cannot be matched unambiguously.
-	The preview uses SwiftUI's native Liquid Glass buttons on macOS 26+ when built
-	with Xcode 26+, with standard native buttons on older systems. Camera,
-	record/stop, and pause/resume controls use SF Symbols with tooltips. There are
-	no pin or fullscreen buttons. The title shows live/paused status or the recording
-	timer. The window fits the device aspect ratio on startup and rotation, and the
-	controls remain outside the device image. A disconnection clears the image;
-	reconnect and start a new preview to resume.
-- **Android:** requires [scrcpy 3 or newer](https://github.com/Genymobile/scrcpy)
-	and Android SDK platform tools. If scrcpy is missing or outdated, MauiDeploy
-	offers **Install and Continue** or **Upgrade and Continue** using your existing
-	Homebrew installation. It shows cancellable installation progress, verifies the
-	installed version, then resumes the selected preview automatically. A suitable
-	Homebrew copy is reused even when it is not on VS Code's PATH. Homebrew itself
-	is not installed automatically; missing Homebrew opens setup guidance. Manual
-	setup is also supported with `brew install scrcpy` or `brew upgrade scrcpy`.
-	MauiDeploy selects the exact authorized USB or wireless-ADB device and starts
-	a view-only scrcpy window with audio, clipboard synchronization, and device
-	control disabled. Scrcpy handles orientation and window resizing. Its native
-	shortcuts include Cmd+F for fullscreen, Cmd+Z to freeze the display, and
-	Cmd+Shift+Z to resume. No installation runs without confirmation, and cancelled
-	or failed setup never starts a preview.
-- **iOS simulator:** brings the chosen booted Simulator forward using the selected
-	Xcode installation. Use Simulator's own window controls. MauiDeploy does not
-	shut down the simulator or close other Simulator windows when the command ends.
+- **Physical iPhone:** uses native USB capture and the same screen selection and
+	camera permission as recording. On macOS 26+ with Xcode 26+, the native window
+	uses SwiftUI Liquid Glass controls; older systems use native fallback controls.
+	Screenshot, record/stop and pause/resume stay outside device pixels. The window
+	fits the device aspect ratio on startup and rotation. A disconnection clears the
+	image; reconnect and start a new preview to resume.
+- **Android:** requires [scrcpy 3+](https://github.com/Genymobile/scrcpy) and
+	authorized USB or wireless ADB. If needed, MauiDeploy offers Homebrew installation
+	or upgrade with explicit consent, validates the result and resumes the preview.
+	Homebrew itself is not installed automatically. The view-only window disables
+	audio, device control and clipboard synchronization. Native scrcpy shortcuts include
+	Cmd+F for fullscreen, Cmd+Z to freeze and Cmd+Shift+Z to resume.
+- **iOS simulator:** brings the selected booted Simulator forward. Stopping does
+	not shut down the simulator or close other Simulator windows.
 
-Enable `mauideploy.livePreview.alwaysOnTop` to open iPhone and Android preview
-windows above other windows; it defaults to `false`. This is a VS Code setting,
-not an in-window pin button, and does not affect Simulator.
+The sidebar shows live/paused/disconnected state and a stop action. Closing the
+native window or stopping the preview ends only the helper MauiDeploy started.
+Reloading or closing the extension also stops owned previews.
+`mauideploy.livePreview.alwaysOnTop` defaults to `false`; it affects physical-device
+preview windows, not Simulator. There is no in-window pin or fullscreen control.
 
-The progress notification closes when the preview is live. The status-bar button
-continues showing the session state and becomes **Stop Live Device Preview**.
-Closing the native preview window or stopping the preview ends only the helper
-started by MauiDeploy. Reloading or closing the extension also stops it.
+The iPhone window's camera captures the displayed or paused frame into the existing
+VS Code preview/clipboard flow. Record creates an explicit silent clip without
+closing the live stream; Stop uses the existing MP4 preview/save flow. Closing the
+window before finalization discards that unfinished clip. Starting a separate
+recording from the sidebar asks before closing an active preview.
 
-Previewing alone saves no files and does not capture audio. In the iPhone window,
-the camera button captures the displayed device frame (including a paused frame),
-opens it in VS Code, and copies it to the clipboard without including window
-controls. Record starts an explicit silent clip while the preview stays open;
-Stop finishes it and opens the existing MP4 preview, Save Video dialog, and Finder
-flow. The three-minute recording limit still applies. Closing the window before
-the clip is finalized discards the unfinished recording.
+These are local macOS workflows; remote-host capture is not supported. Device
+notifications appear in previews and recordings, so consider Focus mode for demos.
+USB iPhone preview startup, screenshots and short standalone MP4 recording have
+been verified on hardware. Sustained streaming, in-window clips, meeting-app sharing
+and wireless-ADB streaming still need broader hardware validation.
 
-The VS Code screenshot and recording commands remain available. Starting a
-separate recording through the status bar still asks before closing an active
-preview. These are local macOS workflows; remote-host previews are not supported.
-Phone notifications are visible in the preview, so consider Focus mode during
-demos. USB iPhone startup through the first rendered live frame has been verified
-on hardware. Sustained frame rate, in-window recording on real devices,
-meeting-app sharing, and wireless-ADB streaming still need broader verification.
+## Branch And PR Deployment
+
+Choose **Deploy branch or PR** in the sidebar or command palette. On first use,
+select a Git remote and MAUI project; **Set Up Branch Deployment** changes that
+setup later. Search local/remote branches or paste a GitHub/GitHub Enterprise PR
+URL. Setup and selection take place in the sidebar. Every deployment asks for a
+target device, even when only one is connected, and remembers the last choice.
+Branch/PR deployment always uses Debug and does not change ordinary Run selections.
+
+MauiDeploy reuses a detached sibling worktree named `<repository>-mauideploy`.
+Your active checkout, branch and uncommitted edits stay untouched. The deployment
+worktree must be clean and owned by MauiDeploy; dirty or unmanaged directories are
+never overwritten. Missing managed, detached, unlocked worktrees can be recreated.
+Locked or moved worktrees require repair rather than automatic pruning. A repository
+lock prevents concurrent deployments. Before removing a stale deployment lock,
+stop every related build/deployment and remove only the lock named in the error.
+
+Workspace trust is required. Fork PRs require explicit consent to build untrusted
+code. GitHub CLI authentication is checked for the remote's specific host. The
+fetched PR commit must still match the inspected head; cancellation, failed setup
+or a changed PR prevents deployment.
+
+### Prerequisites
+
+Before branch/PR deployment, MauiDeploy checks Git, host-specific `gh` sign-in,
+selected Xcode readiness, and the project's .NET SDK and MAUI iOS workloads.
+Consent-based setup can install supported tools through existing Homebrew or
+prepare a private side-by-side SDK under extension storage. It does not change
+`global.json`, system SDKs or global PATH, run automatic administrator commands,
+or install Homebrew. Sign-in remains in a user-operated terminal. Successful setup
+rechecks requirements and resumes the same request.
+
+The selected worktree's SDK resolver is authoritative. Ambiguous SDK policy,
+signing and private feeds require manual configuration. This preflight covers
+local macOS/iOS branch deployment; automatic Android JDK/SDK setup and remote
+extension hosts are not included. Ordinary Run/Debug keep their existing behavior.
+
+### PR Links And Optional CLI
+
+The bundled `cli/mauideploy` launcher supports `setup` and `pr-link`; use
+`cli/mauideploy.cmd` on Windows. Run it from the application repository:
+
+```sh
+mauideploy setup
+mauideploy pr-link https://github.com/owner/repository/pull/42
+```
+
+PR links use Microsoft's VS Code redirect, keep repository details in the URL
+fragment, and include a separate GitHub Pages fallback. The fallback has explicit
+Open in VS Code and return-to-PR links. `--insiders` selects VS Code Insiders;
+`--bridge` retains support for a self-hosted bridge. Opening a link still requires
+matching repository setup, workspace trust and device selection before deployment.
 
 ## Android Build Performance
 

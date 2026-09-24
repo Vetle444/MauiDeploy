@@ -1,8 +1,8 @@
 {
   "name": "maui-deploy",
   "displayName": "MauiDeploy",
-  "description": "Rider-like toolbar for building, deploying, and debugging with Hot-Reload in .NET MAUI apps",
-  "version": "1.6.5",
+  "description": "A focused tools window for deploying, debugging, capturing, and inspecting .NET MAUI apps",
+  "version": "2.0.0",
   "author": "FinstadProductions",
   "publisher": "FinstadProductions",
   "license": "MIT",
@@ -38,6 +38,25 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mauideploy",
+          "title": "MAUI Deploy",
+          "icon": "media/tools.svg"
+        }
+      ]
+    },
+    "views": {
+      "mauideploy": [
+        {
+          "id": "mauideploy.tools",
+          "name": "Tools",
+          "type": "webview",
+          "contextualTitle": "MAUI Deploy"
+        }
+      ]
+    },
     "configuration": {
       "title": "MAUI Deploy",
       "properties": {
@@ -138,6 +157,11 @@
     ],
     "commands": [
       {
+        "command": "mauideploy.openTools",
+        "title": "MAUI Deploy: Open Tools",
+        "icon": "$(tools)"
+      },
+      {
         "command": "mauideploy.deployBranch",
         "title": "MAUI Deploy: Deploy Branch or PR",
         "icon": "$(git-pull-request-go-to-changes)"
@@ -146,6 +170,41 @@
         "command": "mauideploy.setupBranchDeploy",
         "title": "MAUI Deploy: Set Up Branch Deployment",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "mauideploy.livePreview",
+        "title": "MAUI Deploy: Live Device Preview",
+        "icon": "$(device-desktop)"
+      },
+      {
+        "command": "mauideploy.stopLivePreview",
+        "title": "MAUI Deploy: Stop Live Device Preview",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mauideploy.stopDebug",
+        "title": "MAUI Deploy: Stop Debugging",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "mauideploy.openSettings",
+        "title": "MAUI Deploy: Settings",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "mauideploy.openLogs",
+        "title": "MAUI Deploy: Open Output",
+        "icon": "$(output)"
+      },
+      {
+        "command": "mauideploy.openTerminal",
+        "title": "MAUI Deploy: Open Terminal",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "mauideploy.memoryDiagnostics",
+        "title": "MAUI Deploy: DUI Memory Diagnostics",
+        "icon": "$(circuit-board)"
       },
       {
         "command": "mauideploy.screenshot",
@@ -171,16 +230,6 @@
         "command": "mauideploy.saveRecording",
         "title": "MAUI Deploy: Save Recording",
         "icon": "$(save)"
-      },
-      {
-        "command": "mauideploy.livePreview",
-        "title": "MAUI Deploy: Live Device Preview",
-        "icon": "$(device-desktop)"
-      },
-      {
-        "command": "mauideploy.stopLivePreview",
-        "title": "MAUI Deploy: Stop Live Device Preview",
-        "icon": "$(debug-stop)"
       },
       {
         "command": "mauideploy.run",
@@ -257,6 +306,10 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "build:memory": "npm --prefix memory-inspector run build",
+    "test:memory": "npm --prefix memory-inspector test",
+    "test:memory:vscode": "npm run compile && npm run build:memory && node test/memory-vscode.cjs",
+    "vscode:prepublish": "npm run compile && npm run build:memory",
     "test": "npm run compile && node --test test/*.test.cjs",
     "watch": "tsc -watch -p ./",
     "package": "npx @vscode/vsce package --allow-missing-repository"

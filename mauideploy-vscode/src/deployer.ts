@@ -118,7 +118,7 @@ async function buildAndDeployIos(
     terminalName?: string,
     dotnetPath?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath), dotnetPath);
+    const terminal = getBuildTerminal(true, terminalName, dotnetPath ? path.dirname(projectPath) : undefined, dotnetPath);
     terminal.show();
 
     const dotnet = dotnetPath ? shellQuote(dotnetPath) : 'dotnet';
@@ -196,7 +196,7 @@ async function buildAndDeployIosDevice(
     terminalName?: string,
     dotnetPath?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath), dotnetPath);
+    const terminal = getBuildTerminal(true, terminalName, dotnetPath ? path.dirname(projectPath) : undefined, dotnetPath);
     terminal.show();
 
     const dotnet = dotnetPath ? shellQuote(dotnetPath) : 'dotnet';
@@ -400,7 +400,7 @@ async function buildAndDeployAndroid(
     onProgress?: (elapsedMs: number, buildPercent: number) => void,
     terminalName?: string
 ): Promise<BuildResult> {
-    const terminal = getBuildTerminal(true, terminalName, path.dirname(projectPath));
+    const terminal = getBuildTerminal(true, terminalName);
     terminal.show();
 
     const result = await buildAndInstallAndroid(terminal, projectPath, platform, device.id, config, token, onProgress);

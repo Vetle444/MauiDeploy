@@ -10,6 +10,7 @@ function harness(results, collectBinlog = false) {
     const localRequire = createRequire(filename);
     const commands = [];
     const messages = [];
+    const terminals = [];
     const state = new Map();
     const settings = { 'ios.collectBinlogs': collectBinlog };
     let clock = 0;
@@ -21,9 +22,14 @@ function harness(results, collectBinlog = false) {
             if (name === 'vscode') {
                 return {
                     window: {
+                        createTerminal: options => {
+                            terminals.push(options);
+                            return { show() {}, dispose() {} };
+                        },
                         createOutputChannel: () => ({ appendLine: line => messages.push(line) }),
                         showErrorMessage: message => messages.push(message)
                     },
+                    ThemeIcon: class {},
                     workspace: { getConfiguration: () => ({ get: (key, fallback) => settings[key] ?? fallback }) },
                     Uri: { file: value => value }
                 };
@@ -52,18 +58,37 @@ function harness(results, collectBinlog = false) {
     });
     vm.runInContext(fs.readFileSync(filename, 'utf8') + `
         runTerminalCommand = fakeRun;
-        getBuildTerminal = () => ({ show() {} });
         sharedBuildProps = () => '';
         restoreFlag = () => '';
         runBuildCommand = async (terminal, factory, timeout, token) =>
             fakeRun(terminal, factory(''), timeout, undefined, undefined, token);
         exports.testApi = { launchIosDeviceApp, launchIosSimulatorApp, runIosBuildCommand, runIosPhysicalBuild, iosFastBuildProps, buildForDebug, buildAndDeployIos, buildAndDeployIosDevice };
     `, context, { filename });
-    return { ...context.exports.testApi, commands, messages, settings, state };
+    return { ...context.exports.testApi, commands, messages, settings, state, terminals };
 }
 
 const token = { marker: 'token' };
 const device = { id: 'test-device', name: 'Test phone' };
+
+test('iOS branch builds use the selected SDK for restore, clean and build in a scoped terminal', async () => {
+    const platform = { name: 'iOS', framework: 'net10.0-ios' };
+    const sdk = '/tmp/Private SDK/dotnet';
+    for (const type of ['simulator', 'physical']) {
+        const fixture = harness(Array.from({ length: 5 }, () => ({ success: true, durationMs: 100 })));
+        const build = type === 'physical' ? fixture.buildAndDeployIosDevice : fixture.buildAndDeployIos;
+        const result = await build('/tmp/Worktree/App.csproj', platform, device, 'Debug', token,
+            undefined, 'MAUI Deploy - Branch', sdk);
+        assert.equal(result.success, true);
+        const buildCommands = fixture.commands.filter(command => !command.startsWith('xcrun'));
+        assert.equal(buildCommands.length, type === 'physical' ? 3 : 1);
+        for (const command of buildCommands) {
+            assert.ok(command.includes(`'${sdk}'`), command);
+        }
+        assert.equal(fixture.terminals[0].cwd, '/tmp/Worktree');
+        assert.equal(fixture.terminals[0].env.DOTNET_ROOT, path.dirname(sdk));
+        assert.ok(fixture.terminals[0].env.PATH.startsWith(path.dirname(sdk) + path.delimiter));
+    }
+});
 
 test('iOS install failure or cancellation prevents launch', async () => {
     for (const cancelled of [false, true]) {

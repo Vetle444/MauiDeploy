@@ -76,18 +76,10 @@ export async function withDeploymentWorktree<Result>(
 async function prepareWorktree(repository: GitRepository, commit: string, signal?: AbortSignal): Promise<void> {
     const markerPath = path.join(repository.commonDirectory, 'mauideploy-worktree.json');
     if (!fs.existsSync(repository.worktreePath)) {
-        await runGit(repository.root, ['worktree', 'add', '--detach', '--', repository.worktreePath, commit], signal);
+        await createDeploymentWorktree(repository, commit, signal);
         await fs.promises.writeFile(markerPath, JSON.stringify({ path: repository.worktreePath }));
     } else {
-        let marker: { path?: string };
-        try {
-            marker = JSON.parse(await fs.promises.readFile(markerPath, 'utf8'));
-        } catch {
-            throw new Error(`Refusing to reuse an unmanaged directory: ${repository.worktreePath}`);
-        }
-        if (marker.path !== repository.worktreePath) {
-            throw new Error(`The MauiDeploy worktree location has changed: ${repository.worktreePath}`);
-        }
+        await validateWorktreeOwnership(repository);
         const existing = await getGitRepository(repository.worktreePath);
         if (existing.commonDirectory !== repository.commonDirectory || existing.root !== repository.worktreePath) {
             throw new Error('The deployment directory is not a worktree of the configured repository.');
@@ -104,5 +96,38 @@ async function prepareWorktree(repository: GitRepository, commit: string, signal
     }
     if (fs.existsSync(path.join(repository.worktreePath, '.gitmodules'))) {
         await runGit(repository.worktreePath, ['submodule', 'update', '--init', '--recursive'], signal);
+    }
+}
+
+async function createDeploymentWorktree(repository: GitRepository, commit: string, signal?: AbortSignal): Promise<void> {
+    const worktrees = await runGit(repository.root, ['worktree', 'list', '--porcelain', '-z'], signal);
+    const registration = worktrees.split('\0\0')
+        .map(record => record.split('\0'))
+        .find(fields => fields.includes(`worktree ${repository.worktreePath}`));
+    const args = ['worktree', 'add', '--detach'];
+    if (registration) {
+        const locked = registration.some(field => field === 'locked' || field.startsWith('locked '));
+        if (locked) {
+            throw new Error(`The missing deployment worktree is locked: ${repository.worktreePath}. If it was moved, run 'git worktree repair' from its new location. Otherwise, restore its availability or explicitly unlock it before deploying.`);
+        }
+        await validateWorktreeOwnership(repository);
+        if (!registration.includes('detached')) {
+            throw new Error('The missing deployment worktree is no longer detached. No changes were made. If it was moved, run \'git worktree repair\' from its new location.');
+        }
+        args.push('--force');
+    }
+    await runGit(repository.root, [...args, '--', repository.worktreePath, commit], signal);
+}
+
+async function validateWorktreeOwnership(repository: GitRepository): Promise<void> {
+    const markerPath = path.join(repository.commonDirectory, 'mauideploy-worktree.json');
+    let marker: { path?: string } | null;
+    try {
+        marker = JSON.parse(await fs.promises.readFile(markerPath, 'utf8'));
+    } catch {
+        throw new Error(`Refusing to reuse an unmanaged directory: ${repository.worktreePath}. If this worktree was moved, run 'git worktree repair' from its new location.`);
+    }
+    if (marker?.path !== repository.worktreePath) {
+        throw new Error(`The MauiDeploy worktree location has changed: ${repository.worktreePath}. If this worktree was moved, run 'git worktree repair' from its new location.`);
     }
 }

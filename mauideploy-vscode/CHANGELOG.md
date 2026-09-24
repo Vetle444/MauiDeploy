@@ -2,6 +2,25 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 2.0.0 - 2026-09-24
+
+### Added
+- Add a dedicated, theme-aware MAUI Deploy tools sidebar with project, device and configuration controls, grouped deployment, capture, diagnostics and workspace tools, and live operation state.
+- Show Apple and Android logos in sidebar device choices, with smaller device/simulator and USB/Wi-Fi indicators.
+- Add a local DUI Memory Diagnostics panel with automatic selected-app/device import and manual multi-file JSONL import, compact counts, timeline, direct refresh and per-check survivor details. Preserve provenance and skip malformed lines without uploading or persisting imported data; private physical-iOS extraction copies are cleaned up after each read.
+
+### Changed
+- Keep Run, the project picker, the device picker and the MAUI Deploy tools button in the status bar. Build, deploy and test operations share the Run/Stop position; recording and preview controls move to the sidebar.
+- Show progress and cancellation in the visible tools sidebar instead of duplicate progress notifications. Retain native progress when the sidebar is hidden.
+- Move project, device, branch/PR, test, capture and setup choices into the tools sidebar, including search, live device refresh, multiple selection and cancellation. Retain native file and consent dialogs.
+- Show the newest memory diagnostic check first in the recent check sequence.
+- Simplify memory diagnostics by removing filter and interpretation controls. Expose Refresh directly beside Summary and Checks; reread device JSONL with one click or reselect local exports without opening the Files menu.
+- Replace visible true/false status text with zombie and checkmark icons, retaining tooltips and screen-reader descriptions.
+
+### Fixed
+- Avoid blocking physical-iPhone MP4 finalization with a synchronous capture-session stop before export. Do not report an intentional recording cancellation as a failure.
+- Recreate a missing managed deployment worktree only when its registration is detached and unlocked. Preserve other worktrees and require explicit repair for moved, locked or unowned directories.
+
 ## 1.6.5 - 2026-09-21
 
 ### Added

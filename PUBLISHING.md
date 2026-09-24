@@ -48,7 +48,8 @@ cd ../MauiDeploy.Debugger
 dotnet publish -c Release -o ../mauideploy-vscode/out/debugger/
 
 cd ../mauideploy-vscode
-npm install
+npm ci
+npm --prefix memory-inspector ci
 npm run compile
 npx @vscode/vsce publish
 ```
@@ -94,7 +95,8 @@ dotnet publish -c Release -o ../mauideploy-vscode/out/debugger/
 
 ```bash
 cd ../mauideploy-vscode
-npm install
+npm ci
+npm --prefix memory-inspector ci
 npm run compile
 npm run package
 ```
@@ -107,6 +109,8 @@ code --install-extension mauideploy-*.vsix --force
 
 8. Smoke test the extension from VS Code:
 
+- Run `npm test`, `npm --prefix memory-inspector test` and `npm --prefix memory-inspector run test:browser`.
+- Test the exact package with `node test/memory-vscode.cjs --vsix /absolute/path/to/package.vsix`; this uses an isolated profile and synthetic device data.
 - Confirm the MAUI Deploy status bar controls appear in a MAUI workspace.
 - Select a project and device.
 - Run or debug a sample app.
@@ -125,7 +129,7 @@ git push
 
 ```bash
 cd mauideploy-vscode
-npx @vscode/vsce publish
+npx @vscode/vsce publish --packagePath /absolute/path/to/package.vsix
 ```
 
 If you only want to create a local VSIX and not publish publicly, stop after `npm run package`.

@@ -1,5 +1,6 @@
 import type * as vscode from 'vscode';
 import { detectAllDevices, Device, Platform } from './devices';
+import type { ToolQuickPick } from './toolPicker';
 
 export interface DevicePickItem extends vscode.QuickPickItem {
     device?: Device;
@@ -8,7 +9,7 @@ export interface DevicePickItem extends vscode.QuickPickItem {
 const deviceRefreshIntervalMs = 3000;
 
 export function showDevicePicker(
-    picker: vscode.QuickPick<DevicePickItem>,
+    picker: ToolQuickPick<DevicePickItem>,
     platforms: Platform[],
     buildItems: (devices: Device[]) => DevicePickItem[],
     token?: vscode.CancellationToken

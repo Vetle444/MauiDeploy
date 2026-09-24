@@ -11,6 +11,7 @@ import {
     listBranches, listMatchingRemotes, resolveBranchCommit, getPullRequestHead, fetchPullRequestCommit
 } from './branchSources';
 import { getGitRepository, GitRepository, runGit, withDeploymentWorktree } from './worktrees';
+import { createToolQuickPick, showToolQuickPick } from './toolPicker';
 
 type DeploymentSource = { branch: BranchReference } | { pullRequest: PullRequestReference };
 type ReportProgress = (message: string, elapsedMs?: number, percent?: number) => void;
@@ -157,7 +158,7 @@ async function pickDeploymentDevice(
         }
         return items;
     };
-    const picker = vscode.window.createQuickPick<DevicePickItem>();
+    const picker = createToolQuickPick<DevicePickItem>();
     picker.title = `Deploy ${label}: Device`;
     picker.placeholder = `${profile.projectPath} / ${profile.configuration}`;
     picker.matchOnDescription = true;
@@ -185,7 +186,7 @@ async function selectDeploymentProfile(
         }
         let profile = profiles[0];
         if (profiles.length > 1) {
-            const choice = await vscode.window.showQuickPick(profiles.map(candidate => ({
+            const choice = await showToolQuickPick(profiles.map(candidate => ({
                 label: path.basename(candidate.repositoryRoot), description: candidate.repositoryRoot, profile: candidate
             })), { title: 'Deploy PR: Repository', matchOnDescription: true });
             if (!choice) { throw new vscode.CancellationError(); }
@@ -206,9 +207,11 @@ async function selectWorkspaceRepository(currentProject?: string): Promise<GitRe
         const folders = vscode.workspace.workspaceFolders ?? [];
         if (folders.length === 1) { directory = folders[0].uri.fsPath; }
         if (folders.length > 1) {
-            const choice = await vscode.window.showWorkspaceFolderPick({ placeHolder: 'Repository to deploy from' });
+            const choice = await showToolQuickPick(folders.map(folder => ({
+                label: folder.name, description: folder.uri.fsPath, folder,
+            })), { title: 'Repository to deploy from', matchOnDescription: true });
             if (!choice) { throw new vscode.CancellationError(); }
-            directory = choice?.uri.fsPath;
+            directory = choice.folder.uri.fsPath;
         }
     }
     if (!directory) { throw new Error('Open your application repository to configure branch deployment.'); }
@@ -237,7 +240,7 @@ async function findPullRequestRepository(
     }
     if (repositories.size === 1) { return [...repositories.values()][0]; }
     if (repositories.size > 1) {
-        const choice = await vscode.window.showQuickPick([...repositories.values()].map(repository => ({
+        const choice = await showToolQuickPick([...repositories.values()].map(repository => ({
             label: `$(repo) ${path.basename(repository.root)}`, description: repository.root, repository
         })), { title: 'Set Up PR Deployment: Repository', matchOnDescription: true });
         if (!choice) { throw new vscode.CancellationError(); }
@@ -272,7 +275,7 @@ async function setupDeploymentProfile(
             const ordered = [...choices];
             if (preferredIndex > 0) { ordered.unshift(...ordered.splice(preferredIndex, 1)); }
             const icons: Record<string, string> = { 'Git Remote': 'repo', Project: 'file-code' };
-            const selection = await vscode.window.showQuickPick(ordered.map(choice => ({
+            const selection = await showToolQuickPick(ordered.map(choice => ({
                 label: `$(${icons[title]}) ${choice.label}`, description: choice.description, choice
             })), {
                 title: `Branch Deployment: ${title}`, placeHolder: repository.root,
@@ -293,7 +296,7 @@ async function pickBranch(
     profile: BranchDeployProfile,
     signal: AbortSignal
 ): Promise<DeploymentSource | undefined> {
-    const picker = vscode.window.createQuickPick<BranchPickItem>();
+    const picker = createToolQuickPick<BranchPickItem>();
     picker.title = `Deploy Branch: ${profile.projectPath} / ${profile.configuration}`;
     picker.placeholder = 'Search branches or paste a GitHub PR URL';
     picker.matchOnDescription = true;

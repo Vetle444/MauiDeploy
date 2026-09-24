@@ -67,6 +67,93 @@ test('detached deployments reuse one worktree and preserve the active branch, in
     assert.equal(fs.readFileSync(path.join(fixture.root, 'App.csproj'), 'utf8'), 'uncommitted agent changes');
 });
 
+test('missing managed deployment worktrees are recreated without pruning other registrations', async context => {
+    const fixture = repositoryFixture(context);
+    const repository = await getGitRepository(fixture.root);
+    await withDeploymentWorktree(repository, fixture.firstCommit, async () => {});
+    const otherWorktree = path.join(path.dirname(repository.worktreePath), 'Other worktree');
+    git(repository.root, 'worktree', 'add', '--detach', '--', otherWorktree, fixture.firstCommit);
+    fs.rmSync(otherWorktree, { recursive: true });
+    fs.rmSync(repository.worktreePath, { recursive: true });
+
+    await withDeploymentWorktree(repository, fixture.secondCommit, async directory => {
+        assert.equal(directory, repository.worktreePath);
+        assert.equal(git(directory, 'rev-parse', 'HEAD'), fixture.secondCommit);
+        assert.equal(git(directory, 'branch', '--show-current'), '');
+    });
+
+    const worktrees = git(repository.root, 'worktree', 'list', '--porcelain', '-z').split('\0');
+    assert.ok(worktrees.includes(`worktree ${otherWorktree}`));
+    assert.equal(worktrees.filter(field => field === `worktree ${repository.worktreePath}`).length, 1);
+    assert.equal(git(repository.root, 'branch', '--show-current'), 'feature/agent');
+    assert.equal(git(repository.root, 'rev-parse', 'HEAD'), fixture.secondCommit);
+    assert.equal(fs.existsSync(path.join(repository.commonDirectory, 'mauideploy.lock')), false);
+});
+
+test('missing locked deployment worktrees are never replaced', async context => {
+    for (const reason of [undefined, 'Moved to an offline volume']) {
+        const fixture = repositoryFixture(context);
+        const repository = await getGitRepository(fixture.root);
+        await withDeploymentWorktree(repository, fixture.firstCommit, async () => {});
+        const args = ['worktree', 'lock'];
+        if (reason) { args.push('--reason', reason); }
+        git(repository.root, ...args, '--', repository.worktreePath);
+        fs.rmSync(repository.worktreePath, { recursive: true });
+        const registrations = git(repository.root, 'worktree', 'list', '--porcelain', '-z');
+
+        await assert.rejects(withDeploymentWorktree(repository, fixture.secondCommit, async () => {
+            assert.fail('Must not deploy a locked worktree');
+        }), /locked/);
+
+        assert.equal(fs.existsSync(repository.worktreePath), false);
+        assert.equal(git(repository.root, 'worktree', 'list', '--porcelain', '-z'), registrations);
+        assert.equal(fs.existsSync(path.join(repository.commonDirectory, 'mauideploy.lock')), false);
+    }
+});
+
+test('missing worktrees without matching ownership are never replaced', async context => {
+    for (const marker of [undefined, '{', 'null', JSON.stringify({ path: 'different-worktree' })]) {
+        const fixture = repositoryFixture(context);
+        const repository = await getGitRepository(fixture.root);
+        git(repository.root, 'worktree', 'add', '--detach', '--', repository.worktreePath, fixture.firstCommit);
+        const markerPath = path.join(repository.commonDirectory, 'mauideploy-worktree.json');
+        if (marker !== undefined) { fs.writeFileSync(markerPath, marker); }
+        fs.rmSync(repository.worktreePath, { recursive: true });
+        const registrations = git(repository.root, 'worktree', 'list', '--porcelain', '-z');
+
+        await assert.rejects(withDeploymentWorktree(repository, fixture.secondCommit, async () => {
+            assert.fail('Must not deploy an unmanaged worktree');
+        }), /unmanaged|location has changed/);
+
+        assert.equal(fs.existsSync(repository.worktreePath), false);
+        assert.equal(git(repository.root, 'worktree', 'list', '--porcelain', '-z'), registrations);
+        assert.equal(fs.existsSync(path.join(repository.commonDirectory, 'mauideploy.lock')), false);
+        if (marker !== undefined) {
+            assert.equal(fs.readFileSync(markerPath, 'utf8'), marker);
+        } else {
+            assert.equal(fs.existsSync(markerPath), false);
+        }
+    }
+});
+
+test('missing deployment worktrees switched to a branch are never replaced', async context => {
+    const fixture = repositoryFixture(context);
+    const repository = await getGitRepository(fixture.root);
+    await withDeploymentWorktree(repository, fixture.firstCommit, async () => {});
+    git(repository.worktreePath, 'checkout', '-b', 'user/deployment');
+    fs.rmSync(repository.worktreePath, { recursive: true });
+    const registrations = git(repository.root, 'worktree', 'list', '--porcelain', '-z');
+
+    await assert.rejects(withDeploymentWorktree(repository, fixture.secondCommit, async () => {
+        assert.fail('Must not replace a worktree attached to a branch');
+    }), /no longer detached/);
+
+    assert.equal(fs.existsSync(repository.worktreePath), false);
+    assert.equal(git(repository.root, 'worktree', 'list', '--porcelain', '-z'), registrations);
+    assert.equal(git(repository.root, 'rev-parse', 'refs/heads/user/deployment'), fixture.firstCommit);
+    assert.equal(fs.existsSync(path.join(repository.commonDirectory, 'mauideploy.lock')), false);
+});
+
 test('local deployment edits are never discarded and failures release the repository lock', async context => {
     const fixture = repositoryFixture(context);
     const repository = await getGitRepository(fixture.root);
@@ -165,8 +252,10 @@ test('the registered URI handler preserves PR parameters through VS Code URI ser
                     };
                 }
                 if (name === './branchDeploy') { return { registerBranchSetup() {} }; }
+                if (name === './memoryInspector') { return { registerMemoryInspector() {} }; }
+                if (name === './toolbox') { return { registerToolbox: () => ({ update() {} }) }; }
                 if (name === './screenshotCommand') { return { registerScreenshotCommand() {} }; }
-                if (['./devices', './projects', './deployer'].includes(name)) { return {}; }
+                if (['./devices', './projects', './deployer', './toolProgress', './toolPicker'].includes(name)) { return {}; }
                 return localRequire(name);
             }
         };
@@ -274,13 +363,14 @@ test('branch deployment shows progress before preparation and cleans up on compl
                     } };
                 }
                 if (name === './deployer') { return { cancelBuildTerminals: () => terminalStops++ }; }
+                if (name === './toolProgress') { return { withToolProgress: (options, task) => sandbox.require('vscode').window.withProgress(options, task) }; }
                 if (name.startsWith('./')) { return {}; }
                 return localRequire(name);
             }
         };
         vm.runInNewContext(fs.readFileSync(filename, 'utf8') + `
             ctx = {};
-            sbBranch = {};
+            sbRun = {};
             updateStatusBar = () => {};
             exports.run = cmdDeployBranch;
             exports.stop = cmdStopOperation;
@@ -682,6 +772,12 @@ function deploymentHarness() {
                     devicePickerModule = pickerSandbox.exports;
                 }
                 return devicePickerModule;
+            }
+            if (name === './toolPicker') {
+                return {
+                    createToolQuickPick: () => sandbox.require('vscode').window.createQuickPick(),
+                    showToolQuickPick: (...args) => sandbox.require('vscode').window.showQuickPick(...args),
+                };
             }
             if (name === './worktrees') {
                 return {

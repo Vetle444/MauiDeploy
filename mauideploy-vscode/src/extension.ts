@@ -15,6 +15,12 @@ import { formatRecordingTime, VideoRecordingState, registerScreenshotCommand } f
 import { LivePreviewState } from './livePreview';
 import { deployBranch, registerBranchSetup } from './branchDeploy';
 import { parseDeployLink, PullRequestReference } from './branchSources';
+import { registerMemoryInspector } from './memoryInspector';
+import { MemoryDiagnosticsError, resolveMemoryDiagnosticsTarget } from './memoryDiagnostics';
+import { registerToolbox, Toolbox } from './toolbox';
+import type { ToolboxContext } from './toolboxModel';
+import { withToolProgress } from './toolProgress';
+import { createToolQuickPick, showToolQuickPick } from './toolPicker';
 import {
     buildAndDeploy, deployFromBin, buildForDebug, cancelBuildTerminals, disposeTerminals,
     askCopilotToFixLastBuildFailure, runTests,
@@ -59,9 +65,12 @@ interface ActiveOperation {
     command: OperationCommand;
     item: vscode.StatusBarItem;
     cancellation: vscode.CancellationTokenSource;
+    message: string;
+    progress?: number;
 }
 
 let activeOperation: ActiveOperation | undefined;
+let toolbox: Toolbox | undefined;
 
 // ── Device Cache ───────────────────────────────────────
 let cachedDevices: Device[] = [];
@@ -78,17 +87,9 @@ const lastAppliedXamlByFile = new Map<string, string>();
 // ── Status Bar ─────────────────────────────────────────
 
 let sbRun: vscode.StatusBarItem;
-let sbBranch: vscode.StatusBarItem;
-let sbRunMultiple: vscode.StatusBarItem;
-let sbDeployFromBin: vscode.StatusBarItem;
-let sbDebug: vscode.StatusBarItem;
-let sbTests: vscode.StatusBarItem;
 let sbProject: vscode.StatusBarItem;
-let sbConfig: vscode.StatusBarItem;
 let sbDevice: vscode.StatusBarItem;
-let sbScreenshot: vscode.StatusBarItem;
-let sbVideo: vscode.StatusBarItem;
-let sbPreview: vscode.StatusBarItem;
+let sbTools: vscode.StatusBarItem;
 let isTakingScreenshot = false;
 let videoState: VideoRecordingState = 'idle';
 let videoMessage: string | undefined;
@@ -105,6 +106,24 @@ export function activate(context: vscode.ExtensionContext) {
     loadState();
     createStatusBar(context);
     registerCommands(context);
+    toolbox = registerToolbox(context, getToolboxContext);
+    registerMemoryInspector(context, async signal => {
+        if (!state.projectPath || !fs.existsSync(state.projectPath)) {
+            if (!await cmdPickProject()) return undefined;
+        }
+        signal.throwIfAborted();
+        if (!state.deviceId || !state.devicePlatform || !state.deviceType) {
+            if (!await cmdPickDevice()) return undefined;
+        }
+        signal.throwIfAborted();
+        if (!state.projectPath || !state.deviceId || !state.devicePlatform || !state.deviceType) {
+            throw new MemoryDiagnosticsError('Select a project and device in MAUI Deploy first.');
+        }
+        return resolveMemoryDiagnosticsTarget(state.projectPath, state.config, {
+            id: state.deviceId, name: state.deviceName ?? state.deviceId,
+            platform: state.devicePlatform, type: state.deviceType,
+        }, signal);
+    });
     registerBranchSetup(context, () => state.projectPath);
     context.subscriptions.push(vscode.window.registerUriHandler({
         async handleUri(uri) {
@@ -167,115 +186,29 @@ async function refreshDeviceCache() {
 // ── Status Bar Creation ────────────────────────────────
 
 function createStatusBar(context: vscode.ExtensionContext) {
-    // ▶  🚀  🐛  |  MyApp  |  Debug  |  iPhone 16 Pro  |  📋
-    sbRun = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 101);
+    sbRun = vscode.window.createStatusBarItem('mauideploy.run', vscode.StatusBarAlignment.Left, 101);
+    sbRun.name = 'MAUI Deploy Run';
     sbRun.command = 'mauideploy.run';
-    context.subscriptions.push(sbRun);
-
-    sbBranch = vscode.window.createStatusBarItem('mauideploy.deployBranch', vscode.StatusBarAlignment.Left, 100.9);
-    sbBranch.name = 'MAUI Deploy Branch';
-    sbBranch.command = 'mauideploy.deployBranch';
-    context.subscriptions.push(sbBranch);
-
-    sbRunMultiple = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100.75);
-    sbRunMultiple.command = 'mauideploy.runMultiple';
-    context.subscriptions.push(sbRunMultiple);
-
-    sbDeployFromBin = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100.5);
-    sbDeployFromBin.command = 'mauideploy.deployFromBin';
-    context.subscriptions.push(sbDeployFromBin);
-
-    sbDebug = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-    sbDebug.command = 'mauideploy.debug';
-    context.subscriptions.push(sbDebug);
-
-    sbTests = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99.5);
-    sbTests.command = 'mauideploy.runTests';
-    context.subscriptions.push(sbTests);
-
-    sbProject = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
-    sbProject.command = 'mauideploy.pickProject';
-    context.subscriptions.push(sbProject);
-
-    sbConfig = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 98);
-    sbConfig.command = 'mauideploy.toggleConfig';
-    context.subscriptions.push(sbConfig);
-
-    sbDevice = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 97);
+    sbProject = vscode.window.createStatusBarItem('mauideploy.project', vscode.StatusBarAlignment.Left, 99);
+    sbProject.name = 'MAUI Deploy Project';
+    sbDevice = vscode.window.createStatusBarItem('mauideploy.device', vscode.StatusBarAlignment.Left, 97);
+    sbDevice.name = 'MAUI Deploy Device';
     sbDevice.command = 'mauideploy.pickDevice';
-    context.subscriptions.push(sbDevice);
-
-    sbScreenshot = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 96);
-    context.subscriptions.push(sbScreenshot);
-
-    sbVideo = vscode.window.createStatusBarItem('mauideploy.recordVideo', vscode.StatusBarAlignment.Left, 95);
-    sbVideo.name = 'MAUI Deploy Video Recording';
-    context.subscriptions.push(sbVideo);
-
-    sbPreview = vscode.window.createStatusBarItem('mauideploy.livePreview', vscode.StatusBarAlignment.Left, 94);
-    sbPreview.name = 'MAUI Deploy Live Device Preview';
-    context.subscriptions.push(sbPreview);
-
+    sbTools = vscode.window.createStatusBarItem('mauideploy.tools', vscode.StatusBarAlignment.Left, 96);
+    sbTools.name = 'MAUI Deploy Tools';
+    context.subscriptions.push(sbRun, sbProject, sbDevice, sbTools);
     updateStatusBar();
 }
 
 function updateStatusBar() {
-    if (!isBuilding) {
-        sbBranch.text = '$(git-pull-request-go-to-changes)';
-        sbBranch.command = 'mauideploy.deployBranch';
-        sbBranch.color = '#4ec9b0';
-        sbBranch.backgroundColor = undefined;
-        sbBranch.tooltip = 'Deploy Branch or PR using a separate worktree. Choose a device each time. Settings: MAUI Deploy: Set Up Branch Deployment.';
-    }
-    sbBranch.show();
+    sbTools.text = '$(tools) MAUI Deploy';
+    if (videoState === 'recording') sbTools.text = `$(record) MAUI Deploy ${formatRecordingTime(videoElapsedMs)}`;
+    sbTools.command = 'mauideploy.openTools';
+    sbTools.tooltip = 'Open MAUI Deploy tools';
+    sbTools.accessibilityInformation = { label: 'Open MAUI Deploy tools' };
+    sbTools.color = videoState === 'recording' ? new vscode.ThemeColor('errorForeground') : undefined;
+    sbTools.show();
 
-    const captureBusy = isTakingScreenshot || videoState !== 'idle';
-    sbScreenshot.text = captureBusy ? '$(loading~spin)' : '$(device-camera)';
-    sbScreenshot.command = captureBusy ? undefined : 'mauideploy.screenshot';
-    sbScreenshot.tooltip = 'Take a device screenshot and copy it to the clipboard';
-    if (process.platform === 'darwin') { sbScreenshot.show(); }
-
-    const videoLabels: Record<Exclude<VideoRecordingState, 'idle' | 'recording'>, string> = {
-        findingDevices: 'Finding devices', choosingDevice: 'Choose device', preparing: 'Preparing video',
-        checkingHelper: 'Checking recorder', buildingHelper: 'Building recorder', waitingForUsb: 'Waiting for USB',
-        choosingUsbScreen: 'Selecting USB screen',
-        waitingForPermission: 'Camera permission', starting: 'Starting video', finalizing: 'Finalizing video',
-        downloading: 'Downloading video', validating: 'Checking video', previewing: 'Opening preview',
-        saving: 'Saving video', cancelling: 'Cancelling video',
-    };
-    sbVideo.text = videoState === 'recording' ? `$(debug-stop) ${formatRecordingTime(videoElapsedMs)}`
-        : videoState !== 'idle' ? `$(loading~spin) ${videoLabels[videoState]}` : '$(record)';
-    const canCancelVideo = videoState !== 'idle' && videoState !== 'cancelling' && videoState !== 'saving';
-    sbVideo.command = videoState === 'recording' ? 'mauideploy.stopRecording'
-        : canCancelVideo ? 'mauideploy.cancelRecording' : captureBusy ? undefined : 'mauideploy.recordVideo';
-    sbVideo.color = videoState === 'recording' ? new vscode.ThemeColor('errorForeground') : undefined;
-    sbVideo.tooltip = videoState === 'recording' ? `${videoMessage}\nStop recording and save video`
-        : videoState === 'idle' ? 'Record device video (up to 3 minutes; physical iPhone requires USB)'
-        : `${videoMessage}${canCancelVideo ? '\nCancel recording' : ''}`;
-    sbVideo.accessibilityInformation = { label: videoMessage || 'Record device video' };
-    if (process.platform === 'darwin') { sbVideo.show(); }
-
-    const previewActive = previewState === 'live' || previewState === 'paused' || previewState === 'disconnected' || previewState === 'recording';
-    const previewLabel = previewState === 'waitingForUsb' ? 'Preview: waiting for USB'
-        : previewState === 'choosingUsbScreen' ? 'Preview: selecting USB screen'
-        : previewState === 'waitingForPermission' ? 'Preview: camera permission'
-        : previewState === 'checkingScrcpy' ? 'Checking scrcpy'
-        : previewState === 'waitingForScrcpyInstall' ? 'Preview: install scrcpy?'
-        : previewState === 'installingScrcpy' ? 'Installing scrcpy'
-        : previewState === 'recording' ? 'Preview recording'
-        : previewState === 'finalizingRecording' ? 'Finishing recording'
-        : previewState === 'paused' ? 'Preview paused'
-        : previewState === 'disconnected' ? 'Preview disconnected' : 'Live preview';
-    sbPreview.text = previewState === 'idle' ? '$(device-desktop)'
-        : previewActive ? `$(debug-stop) ${previewLabel}` : `$(loading~spin) ${previewLabel}`;
-    sbPreview.command = previewState === 'stopping' ? undefined
-        : previewState !== 'idle' ? 'mauideploy.stopLivePreview' : captureBusy ? undefined : 'mauideploy.livePreview';
-    sbPreview.tooltip = previewState === 'idle' ? 'Open a live device window to share in Teams, Slack, or Zoom'
-        : `${previewMessage}\nClose Live Device Preview`;
-    sbPreview.accessibilityInformation = { label: previewMessage || 'Live Device Preview' };
-    if (process.platform === 'darwin') { sbPreview.show(); }
-
-    // ── Run button ──
     if (!isBuilding) {
         sbRun.command = 'mauideploy.run';
         sbRun.text = '$(play)';
@@ -287,83 +220,21 @@ function updateStatusBar() {
             : 'Build & deploy';
         sbRun.tooltip = markdownTooltip(`**$(play) Run** — ${target}\n\n\`${key}\``);
     }
+    sbRun.accessibilityInformation = { label: isBuilding ? 'Stop MAUI Deploy operation' : 'MAUI Deploy Run' };
     sbRun.show();
 
-    // ── Run multiple targets button ──
-    if (!isBuilding) {
-        sbRunMultiple.command = 'mauideploy.runMultiple';
-        sbRunMultiple.text = '$(run-all)';
-        sbRunMultiple.color = '#89d185';
-        sbRunMultiple.backgroundColor = undefined;
-        sbRunMultiple.tooltip = markdownTooltip('**$(run-all) Run Multiple Targets** — Build & deploy to iOS and Android devices together');
-    }
-    sbRunMultiple.show();
-
-    // ── Deploy from bin button ──
-    if (!isBuilding) {
-        sbDeployFromBin.command = 'mauideploy.deployFromBin';
-        sbDeployFromBin.text = '$(rocket)';
-        sbDeployFromBin.color = '#4ec9b0';
-        sbDeployFromBin.backgroundColor = undefined;
-        const target = state.deviceName
-            ? `Deploy existing build to **${state.deviceName}**`
-            : 'Deploy existing build from bin';
-        sbDeployFromBin.tooltip = markdownTooltip(
-            `**$(rocket) Deploy from Bin** — ${target}\n\nSkips build — uses the app already in \`bin/${state.config}\``
-        );
-    }
-    sbDeployFromBin.show();
-
-    // ── Debug button ──
-    if (!isBuilding) {
-        sbDebug.text = '$(bug)';
-        sbDebug.color = '#cca700';
-        sbDebug.backgroundColor = undefined;
-        sbDebug.command = 'mauideploy.debug';
-        sbDebug.tooltip = markdownTooltip(
-            `**$(bug) Debug** — Build with breakpoints & XAML Hot Reload\n\nAttaches Mono SDB debugger · saves XAML changes are live-reloaded`
-        );
-    }
-    sbDebug.show();
-
-    // ── Tests button ──
-    if (!isBuilding) {
-        sbTests.command = 'mauideploy.runTests';
-        sbTests.text = '$(beaker)';
-        sbTests.color = '#c586c0';
-        sbTests.backgroundColor = undefined;
-        sbTests.tooltip = markdownTooltip(
-            '**$(beaker) Run Tests** — Pick a `.csproj` and run `dotnet test`'
-        );
-    }
-    sbTests.show();
-
-    // ── Project ──
+    sbProject.text = '$(file-code) Select Project';
+    sbProject.tooltip = 'Select a .NET MAUI project';
     if (state.projectPath) {
-        const name = path.basename(state.projectPath, '.csproj');
-        sbProject.text = `$(file-code) ${name}`;
-        sbProject.color = undefined;
-        const dir = path.dirname(state.projectPath).replace(process.env.HOME || '', '~');
-        sbProject.tooltip = markdownTooltip(
-            `**Project:** ${name}\n\n$(folder) \`${dir}\`\n\nClick to change`
-        );
-    } else {
-        sbProject.text = '$(file-code) Select Project…';
-        sbProject.color = '#888888';
-        sbProject.tooltip = markdownTooltip('Click to select a .NET MAUI project');
+        sbProject.text = `$(file-code) ${path.basename(state.projectPath, '.csproj')}`;
+        sbProject.tooltip = state.projectPath;
     }
+    sbProject.command = isBuilding ? undefined : 'mauideploy.pickProject';
+    sbProject.color = isBuilding ? new vscode.ThemeColor('disabledForeground') : undefined;
+    if (isBuilding) sbProject.tooltip += '\n\nFinish or stop the current operation before changing project.';
+    sbProject.accessibilityInformation = { label: 'Select MAUI Deploy project' };
     sbProject.show();
 
-    // ── Config ──
-    const configIcon = state.config === 'Debug' ? '$(tools)' : '$(package)';
-    sbConfig.text = `${configIcon} ${state.config}`;
-    sbConfig.color = state.config === 'Debug' ? '#dcdcaa' : '#4ec9b0';
-    sbConfig.tooltip = markdownTooltip(
-        `**Configuration:** ${state.config}\n\nClick to toggle between Debug and Release`
-    );
-    sbConfig.show();
-
-    // ── Device ──
     if (state.deviceName) {
         const icon = state.deviceType === 'physical' ? '$(plug)' :
             state.devicePlatform === 'iOS' ? '$(device-mobile)' : '$(vm)';
@@ -380,9 +251,31 @@ function updateStatusBar() {
         sbDevice.tooltip = markdownTooltip('Click to select a target device');
     }
     sbDevice.show();
+    toolbox?.update();
 
     vscode.commands.executeCommand('setContext', 'mauideploy.ready',
         !!state.projectPath && !!state.deviceId);
+}
+
+function getToolboxContext(): ToolboxContext {
+    return {
+        project: state.projectPath ? {
+            name: path.basename(state.projectPath, '.csproj'),
+            directory: path.dirname(state.projectPath).replace(process.env.HOME || '', '~'),
+        } : undefined,
+        configuration: state.config,
+        device: state.deviceName ? { name: state.deviceName, platform: state.devicePlatform ?? '' } : undefined,
+        trusted: vscode.workspace.isTrusted,
+        captureSupported: process.platform === 'darwin',
+        operation: activeOperation ? {
+            command: activeOperation.command, message: activeOperation.message,
+            progress: activeOperation.progress, cancelling: activeOperation.cancellation.token.isCancellationRequested,
+        } : undefined,
+        debugging: vscode.debug.activeDebugSession?.type === 'mauideploy',
+        screenshotBusy: isTakingScreenshot,
+        recording: { state: videoState, message: videoMessage, elapsed: formatRecordingTime(videoElapsedMs) },
+        preview: { state: previewState, message: previewMessage },
+    };
 }
 
 function markdownTooltip(value: string): vscode.MarkdownString {
@@ -440,6 +333,11 @@ function createStatusBarReporter(item: vscode.StatusBarItem, label: string) {
             item.color = '#f44747';
             item.tooltip = `${label} — ${formatElapsed(elapsedMs)}\n\nClick to stop`;
             lastShownPercent = pct;
+            if (activeOperation?.item === item) {
+                activeOperation.message = `${label} - ${formatElapsed(elapsedMs)}`;
+                activeOperation.progress = pct;
+                updateStatusBar();
+            }
         }
     };
 }
@@ -449,10 +347,12 @@ function beginOperation(command: OperationCommand, item: vscode.StatusBarItem): 
         command,
         item,
         cancellation: new vscode.CancellationTokenSource(),
+        message: 'Preparing operation',
     };
     activeOperation = operation;
     isBuilding = true;
     item.command = 'mauideploy.stop';
+    updateStatusBar();
     return operation;
 }
 
@@ -462,6 +362,11 @@ function showStopButton(item: vscode.StatusBarItem, tooltip: string) {
     item.backgroundColor = undefined;
     item.command = 'mauideploy.stop';
     item.tooltip = `${tooltip}\n\nClick to stop`;
+    if (activeOperation?.item === item) {
+        activeOperation.message = tooltip;
+        activeOperation.progress = undefined;
+        updateStatusBar();
+    }
 }
 
 function finishOperation(operation: ActiveOperation) {
@@ -472,8 +377,9 @@ function finishOperation(operation: ActiveOperation) {
 
     activeOperation = undefined;
     isBuilding = false;
-    operation.item.command = operation.command;
+    operation.item.command = 'mauideploy.run';
     operation.cancellation.dispose();
+    toolbox?.update();
 
     if (operation.item.text.startsWith('$(debug-stop)')) {
         updateStatusBar();
@@ -491,6 +397,8 @@ function cmdStopOperation() {
     operation.item.tooltip = 'Stopping…';
     operation.item.command = undefined;
     operation.cancellation.cancel();
+    operation.message = 'Stopping...';
+    updateStatusBar();
     cancelBuildTerminals();
 }
 
@@ -560,7 +468,7 @@ async function ensureToolsAvailable(tools: ToolRequirement[]): Promise<boolean> 
     }
 
     const packages = Array.from(new Set(missing.map(m => m.brewPackage)));
-    return await vscode.window.withProgress(
+    return await withToolProgress(
         {
             location: vscode.ProgressLocation.Notification,
             title: `Installing ${packages.join(', ')} via Homebrew…`,
@@ -641,6 +549,13 @@ function registerCommands(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('mauideploy.pickDevice', cmdPickDevice),
         vscode.commands.registerCommand('mauideploy.fixBuildErrorWithCopilot', askCopilotToFixLastBuildFailure),
         vscode.commands.registerCommand('mauideploy.cleanBinObj', cmdCleanBinObj),
+        vscode.commands.registerCommand('mauideploy.openSettings', () => vscode.commands.executeCommand('workbench.action.openSettings', '@ext:FinstadProductions.maui-deploy')),
+        vscode.commands.registerCommand('mauideploy.openLogs', () => vscode.commands.executeCommand('workbench.action.output.focus')),
+        vscode.commands.registerCommand('mauideploy.openTerminal', () => vscode.commands.executeCommand('workbench.action.terminal.focus')),
+        vscode.commands.registerCommand('mauideploy.stopDebug', () => {
+            const session = vscode.debug.activeDebugSession;
+            if (session?.type === 'mauideploy') return vscode.debug.stopDebugging(session);
+        }),
     );
 }
 
@@ -684,12 +599,14 @@ function registerDebugHotReload(context: vscode.ExtensionContext) {
         vscode.debug.onDidStartDebugSession(session => {
             if (session.type === 'mauideploy') {
                 startXamlHotReloadWatcher(session);
+                updateStatusBar();
             }
         }),
         vscode.debug.onDidTerminateDebugSession(session => {
             if (session === xamlHotReloadSession) {
                 stopXamlHotReloadWatcher();
             }
+            if (session.type === 'mauideploy') updateStatusBar();
         })
     );
 }
@@ -1075,14 +992,15 @@ async function cmdDeployBranch(pullRequest?: PullRequestReference) {
         void vscode.window.showErrorMessage('Stop the active MAUI debug session before deploying a branch to its device.');
         return;
     }
-    const operation = beginOperation('mauideploy.deployBranch', sbBranch);
-    showStopButton(sbBranch, 'Selecting branch');
-    const reporter = createStatusBarReporter(sbBranch, 'Deploying branch');
+    const operation = beginOperation('mauideploy.deployBranch', sbRun);
+    showStopButton(sbRun, 'Selecting branch');
+    const reporter = createStatusBarReporter(sbRun, 'Deploying branch');
     try {
-        await vscode.window.withProgress({
+        await withToolProgress({
             location: vscode.ProgressLocation.Notification,
             title: pullRequest ? `MAUI Deploy: PR #${pullRequest.number}` : 'MAUI Deploy: Branch',
-            cancellable: true
+            cancellable: true,
+            operationCommand: 'mauideploy.deployBranch',
         }, async (progress, token) => {
             const cancellation = token.onCancellationRequested(() => {
                 if (activeOperation === operation) { cmdStopOperation(); }
@@ -1094,7 +1012,7 @@ async function cmdDeployBranch(pullRequest?: PullRequestReference) {
                 await deployBranch(ctx, operation.cancellation.token, (message, elapsedMs, percent) => {
                     progress.report({ message });
                     if (elapsedMs !== undefined && percent !== undefined) { reporter(elapsedMs, percent); }
-                    else { showStopButton(sbBranch, message); }
+                    else { showStopButton(sbRun, message); }
                 }, state.projectPath, pullRequest);
             } finally {
                 cancellation.dispose();
@@ -1212,17 +1130,17 @@ async function cmdRunMultiple() {
 
     if (!await ensureToolsAvailable(toolsForDeployTargets(targets))) { return; }
 
-    const operation = beginOperation('mauideploy.runMultiple', sbRunMultiple);
-    showStopButton(sbRunMultiple, 'Preparing targets…');
+    const operation = beginOperation('mauideploy.runMultiple', sbRun);
+    showStopButton(sbRun, 'Preparing targets…');
 
     const started = Date.now();
 
     try {
-        if (!await bootDeployTargets(targets, sbRunMultiple, operation.cancellation.token)) { return; }
+        if (!await bootDeployTargets(targets, sbRun, operation.cancellation.token)) { return; }
 
         const projectName = path.basename(state.projectPath!, '.csproj');
-        const progress = createMultiRunProgress(sbRunMultiple, `Building ${projectName}`, targets);
-        sbRunMultiple.tooltip = `Building & deploying to ${formatDeployTargets(targets)}…`;
+        const progress = createMultiRunProgress(sbRun, `Building ${projectName}`, targets);
+        showStopButton(sbRun, `Building & deploying to ${formatDeployTargets(targets)}…`);
 
         const runs = targets.map(async target => {
             const result = await buildAndDeploy(
@@ -1245,13 +1163,13 @@ async function cmdRunMultiple() {
 
         if (failed.length === 0 && cancelled.length === 0) {
             const duration = formatDuration(Date.now() - started);
-            sbRunMultiple.text = '$(check)';
-            sbRunMultiple.color = '#89d185';
-            sbRunMultiple.tooltip = `Deployed to ${formatDeployTargets(targets)} in ${duration}`;
+            sbRun.text = '$(check)';
+            sbRun.color = '#89d185';
+            sbRun.tooltip = `Deployed to ${formatDeployTargets(targets)} in ${duration}`;
             vscode.window.showInformationMessage(`Deployed to ${formatDeployTargets(targets)} in ${duration}`);
             setTimeout(() => updateStatusBar(), 3000);
         } else if (failed.length > 0) {
-            flashError(sbRunMultiple);
+            flashError(sbRun);
             vscode.window.showErrorMessage(`Failed to deploy to ${formatFailedDeployTargets(failed)}. Check the target build terminals.`);
         } else {
             if (!operation.cancellation.token.isCancellationRequested) {
@@ -1264,7 +1182,7 @@ async function cmdRunMultiple() {
 }
 
 async function pickDeployTargets(platforms: Platform[]): Promise<DeployTarget[] | undefined> {
-    const devices = await vscode.window.withProgress(
+    const devices = await withToolProgress(
         {
             location: vscode.ProgressLocation.Notification,
             title: 'Detecting iOS and Android targets…',
@@ -1280,7 +1198,7 @@ async function pickDeployTargets(platforms: Platform[]): Promise<DeployTarget[] 
     }
 
     const items = buildDeployTargetItems(devices, platforms);
-    const picked = await vscode.window.showQuickPick(items, {
+    const picked = await showToolQuickPick(items, {
         canPickMany: true,
         title: 'Select Run Targets',
         placeHolder: 'Pick at least one iOS target and one Android target',
@@ -1410,6 +1328,11 @@ function createMultiRunProgress(item: vscode.StatusBarItem, label: string, targe
         item.text = `$(debug-stop) ${percent}%`;
         item.color = '#f44747';
         item.tooltip = `${label} — ${formatElapsed(Date.now() - started)}\n\nClick to stop`;
+        if (activeOperation?.item === item) {
+            activeOperation.message = `${label} - ${formatElapsed(Date.now() - started)}`;
+            activeOperation.progress = percent;
+            updateStatusBar();
+        }
     };
 
     return {
@@ -1478,8 +1401,8 @@ async function cmdDeployFromBin() {
 
     if (!await ensureToolsAvailable(toolsForCurrentTarget())) { return; }
 
-    const operation = beginOperation('mauideploy.deployFromBin', sbDeployFromBin);
-    showStopButton(sbDeployFromBin, 'Deploying from bin…');
+    const operation = beginOperation('mauideploy.deployFromBin', sbRun);
+    showStopButton(sbRun, 'Deploying from bin…');
 
     try {
         // Boot iOS simulator if needed (skip for physical devices)
@@ -1488,7 +1411,7 @@ async function cmdDeployFromBin() {
             if (operation.cancellation.token.isCancellationRequested) { return; }
             const device = allDevices.find(d => d.id === state.deviceId);
             if (device && device.state === 'Shutdown') {
-                showStopButton(sbDeployFromBin, `Booting ${state.deviceName}…`);
+                showStopButton(sbRun, `Booting ${state.deviceName}…`);
                 const booted = await bootSimulator(device.id);
                 if (!booted) {
                     vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
@@ -1508,9 +1431,9 @@ async function cmdDeployFromBin() {
         const success = await deployFromBin(state.projectPath!, platform, device, state.config);
 
         if (success) {
-            sbDeployFromBin.text = '$(check)';
-            sbDeployFromBin.color = '#89d185';
-            sbDeployFromBin.tooltip = `Deployed from bin to ${state.deviceName}`;
+            sbRun.text = '$(check)';
+            sbRun.color = '#89d185';
+            sbRun.tooltip = `Deployed from bin to ${state.deviceName}`;
             vscode.window.showInformationMessage(`Deployed from bin to ${state.deviceName}`);
             setTimeout(() => updateStatusBar(), 3000);
         }
@@ -1559,8 +1482,8 @@ async function cmdDebug() {
 
     if (!await ensureToolsAvailable(toolsForCurrentTarget())) { return; }
 
-    const operation = beginOperation('mauideploy.debug', sbDebug);
-    showStopButton(sbDebug, 'Preparing debug session…');
+    const operation = beginOperation('mauideploy.debug', sbRun);
+    showStopButton(sbRun, 'Preparing debug session…');
 
     try {
         // Boot iOS simulator if needed (skip for physical devices)
@@ -1569,7 +1492,7 @@ async function cmdDebug() {
             if (operation.cancellation.token.isCancellationRequested) { return; }
             const device = allDevices.find(d => d.id === state.deviceId);
             if (device && device.state === 'Shutdown') {
-                showStopButton(sbDebug, `Booting ${state.deviceName}…`);
+                showStopButton(sbRun, `Booting ${state.deviceName}…`);
                 const booted = await bootSimulator(device.id);
                 if (!booted) {
                     vscode.window.showErrorMessage(`Failed to boot ${state.deviceName}.`);
@@ -1580,13 +1503,13 @@ async function cmdDebug() {
         if (operation.cancellation.token.isCancellationRequested) { return; }
 
         // Build with debug flags (MtouchDebug=true for iOS)
-        showStopButton(sbDebug, 'Building for debug…');
+        showStopButton(sbRun, 'Building for debug…');
         const projectName = path.basename(state.projectPath!, '.csproj');
         const hotReloadPort = xamlHotReloadPort;
         const buildResult = await buildForDebug(
             state.projectPath!, platform, state.config, state.deviceType,
             operation.cancellation.token,
-            createStatusBarReporter(sbDebug, `Building ${projectName} for debug`),
+            createStatusBarReporter(sbRun, `Building ${projectName} for debug`),
             hotReloadPort,
             state.deviceId
         );
@@ -1594,7 +1517,7 @@ async function cmdDebug() {
             return;
         }
         if (!buildResult.success) {
-            flashError(sbDebug);
+            flashError(sbRun);
             return;
         }
 
@@ -1609,7 +1532,7 @@ async function cmdDebug() {
         }
 
         // Start debug session via our custom debug adapter
-        sbDebug.tooltip = 'Starting debug session…';
+        showStopButton(sbRun, 'Starting debug session…');
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         const debugConfig: vscode.DebugConfiguration = {
             name: `MAUI Debug: ${state.deviceName}`,
@@ -1635,12 +1558,12 @@ async function cmdDebug() {
             return;
         }
         if (started) {
-            sbDebug.text = '$(check)';
-            sbDebug.color = '#89d185';
+            sbRun.text = '$(check)';
+            sbRun.color = '#89d185';
             setTimeout(() => updateStatusBar(), 3000);
         } else {
             vscode.window.showErrorMessage('Failed to start debug session.');
-            flashError(sbDebug);
+            flashError(sbRun);
         }
     } finally {
         finishOperation(operation);
@@ -1698,26 +1621,26 @@ async function cmdRunTests() {
     const testProject = await pickTestProject();
     if (!testProject) { return; }
 
-    const operation = beginOperation('mauideploy.runTests', sbTests);
-    showStopButton(sbTests, `Running tests for ${path.basename(testProject.projectPath)}…`);
+    const operation = beginOperation('mauideploy.runTests', sbRun);
+    showStopButton(sbRun, `Running tests for ${path.basename(testProject.projectPath)}…`);
 
     try {
         const testName = path.basename(testProject.projectPath, '.csproj');
         const result = await runTests(
             testProject.projectPath, testProject.config, operation.cancellation.token,
-            createStatusBarReporter(sbTests, `Running tests — ${testName}`)
+            createStatusBarReporter(sbRun, `Running tests — ${testName}`)
         );
         if (result.cancelled) {
             return;
         } else if (result.success) {
             const duration = formatDuration(result.durationMs);
-            sbTests.text = '$(check)';
-            sbTests.color = '#89d185';
-            sbTests.tooltip = `Tests passed for ${testName} in ${duration}`;
+            sbRun.text = '$(check)';
+            sbRun.color = '#89d185';
+            sbRun.tooltip = `Tests passed for ${testName} in ${duration}`;
             vscode.window.showInformationMessage(`Tests passed for ${testName} in ${duration}`);
             setTimeout(() => updateStatusBar(), 3000);
         } else {
-            flashError(sbTests);
+            flashError(sbRun);
         }
     } finally {
         finishOperation(operation);
@@ -1760,7 +1683,7 @@ async function pickTestProject(): Promise<TestProjectPick | undefined> {
     addProjects('Test Projects', testProjects);
     addProjects('Other Projects', otherProjects);
 
-    const picked = await vscode.window.showQuickPick(items, {
+    const picked = await showToolQuickPick(items, {
         title: 'Select Test Project',
         placeHolder: 'Choose a .csproj to run with dotnet test',
         matchOnDescription: true,
@@ -1881,7 +1804,7 @@ async function cmdPickProject(): Promise<boolean> {
     items.push({ label: '$(folder-opened)  Browse…', action: 'browse' });
     items.push({ label: '$(search)  Scan for solutions…', action: 'scan' });
 
-    const picked = await vscode.window.showQuickPick(items, {
+    const picked = await showToolQuickPick(items, {
         title: 'Select MAUI Project',
         placeHolder: 'Type to search…',
         matchOnDescription: true
@@ -1920,7 +1843,7 @@ async function scanForSolutions(): Promise<boolean> {
         '.cache', '.local', '.npm', '.yarn', '.cargo', '.rustup'
     ]);
 
-    return vscode.window.withProgress(
+    return withToolProgress(
         { location: vscode.ProgressLocation.Notification, title: 'Scanning…', cancellable: true },
         async (_progress, token) => {
             const solutions: string[] = [];
@@ -1945,7 +1868,7 @@ async function scanForSolutions(): Promise<boolean> {
                 return false;
             }
 
-            const slnPick = await vscode.window.showQuickPick(
+            const slnPick = await showToolQuickPick(
                 solutions.map(s => ({
                     label: `$(file-symlink-file)  ${path.basename(s)}`,
                     description: s.replace(home, '~'),
@@ -1965,7 +1888,7 @@ async function scanForSolutions(): Promise<boolean> {
                 return true;
             }
 
-            const projPick = await vscode.window.showQuickPick(
+            const projPick = await showToolQuickPick(
                 csprojs.map(c => ({
                     label: `$(file-code)  ${path.basename(c, '.csproj')}`,
                     description: path.dirname(c).replace(home, '~'),
@@ -2090,7 +2013,7 @@ async function cmdPickDevice(): Promise<boolean> {
     };
 
     // Show picker immediately with cached devices, then refresh in background
-    const picker = vscode.window.createQuickPick<DevicePickItem>();
+    const picker = createToolQuickPick<DevicePickItem>();
     picker.title = 'Select Target Device';
     picker.placeholder = 'Type to search…';
     picker.matchOnDescription = true;

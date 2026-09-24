@@ -142,12 +142,15 @@ test('video preview exposes native playback controls and an editor Save action w
         item.command === 'mauideploy.saveRecording' && item.when === 'activeWebviewPanelId == mauideploy.recording'));
 });
 
-test('recording toolbar shows waiting states, changes Cancel to Stop only after startup, and displays elapsed time', () => {
+test('compact toolbar keeps Run, project and device selection while recording states are available in the toolbox', () => {
     const filename = path.resolve(__dirname, '../out/extension.js');
     const localRequire = Module.createRequire(filename);
     const items = new Map();
     let report;
     let screenshotBusy;
+    let getToolboxContext;
+    let updates = 0;
+    const { createToolboxSnapshot } = require('../out/toolboxModel');
     const sandbox = {
         exports: {}, process,
         require(name) {
@@ -157,6 +160,8 @@ test('recording toolbar shows waiting states, changes Cancel to Stop only after 
                     ThemeColor: class { constructor(id) { this.id = id; } },
                     MarkdownString: class { constructor(value) { this.value = value; } },
                     commands: { executeCommand() {} },
+                    workspace: { isTrusted: true },
+                    debug: {},
                     window: {
                         createStatusBarItem(id) {
                             const item = { show() {}, dispose() {} };
@@ -174,6 +179,10 @@ test('recording toolbar shows waiting states, changes Cancel to Stop only after 
                 };
             }
             if (name === './branchDeploy') { return { registerBranchSetup() {} }; }
+            if (name === './memoryInspector') { return { registerMemoryInspector() {} }; }
+            if (name === './toolbox') {
+                return { registerToolbox(context, getContext) { getToolboxContext = getContext; return { update() { updates++; } }; } };
+            }
             if (name.startsWith('./')) { return {}; }
             return localRequire(name);
         },
@@ -186,38 +195,52 @@ test('recording toolbar shows waiting states, changes Cancel to Stop only after 
         registerDebugAdapterFactory = () => {};
         autoDetectProject = () => {};
         startDevicePolling = () => {};
+        exports.updateProject = projectPath => { state.projectPath = projectPath; updateStatusBar(); };
+        exports.updateBuilding = value => { isBuilding = value; updateStatusBar(); };
     `, sandbox, { filename });
     sandbox.exports.activate({ subscriptions: [] });
-    const video = items.get('mauideploy.recordVideo');
-    assert.equal(video.text, '$(record)');
+    assert.deepEqual([...items.keys()], ['mauideploy.run', 'mauideploy.project', 'mauideploy.device', 'mauideploy.tools']);
+    assert.equal(items.get('mauideploy.run').command, 'mauideploy.run');
+    const project = items.get('mauideploy.project');
+    assert.equal(project.command, 'mauideploy.pickProject');
+    sandbox.exports.updateProject('/synthetic/Example.Mobile.csproj');
+    assert.ok(project.text.includes('Example.Mobile'));
+    assert.equal(project.tooltip, '/synthetic/Example.Mobile.csproj');
+    assert.equal(getToolboxContext().project.name, 'Example.Mobile');
+    sandbox.exports.updateBuilding(true);
+    assert.equal(project.command, undefined);
+    sandbox.exports.updateBuilding(false);
+    assert.equal(project.command, 'mauideploy.pickProject');
+    assert.equal(items.get('mauideploy.device').command, 'mauideploy.pickDevice');
+    const video = () => createToolboxSnapshot(getToolboxContext()).actions.find(item => item.id === 'recording');
+    assert.equal(video().command, 'mauideploy.recordVideo');
     for (const [state, label] of [
         ['findingDevices', 'Finding devices'], ['buildingHelper', 'Building recorder'],
         ['waitingForUsb', 'Waiting for USB'], ['waitingForPermission', 'Camera permission'],
         ['starting', 'Starting video'], ['finalizing', 'Finalizing video'], ['downloading', 'Downloading video'],
     ]) {
         report(state, `Progress: ${label}`);
-        assert.equal(video.text, `$(loading~spin) ${label}`);
-        assert.equal(video.command, 'mauideploy.cancelRecording');
-        assert.ok(video.tooltip.includes(label));
-        assert.equal(video.accessibilityInformation.label, `Progress: ${label}`);
+        assert.equal(video().command, 'mauideploy.cancelRecording');
+        assert.equal(video().note, `Progress: ${label}`);
+        assert.equal(video().enabled, true);
     }
     report('recording', 'Recording Phone: 01:05 / 03:00', 65_000);
-    assert.equal(video.text, '$(debug-stop) 01:05');
-    assert.equal(video.command, 'mauideploy.stopRecording');
-    assert.equal(video.color.id, 'errorForeground');
-    assert.match(video.tooltip, /Stop recording and save/);
+    assert.equal(video().command, 'mauideploy.stopRecording');
+    assert.equal(video().note, '01:05');
+    assert.equal(items.get('mauideploy.tools').color.id, 'errorForeground');
+    assert.match(items.get('mauideploy.tools').text, /01:05/);
     for (const state of ['saving', 'cancelling']) {
         report(state, state);
-        assert.equal(video.command, undefined);
+        assert.equal(video().enabled, false);
     }
     report('idle');
-    assert.equal(video.text, '$(record)');
-    assert.equal(video.command, 'mauideploy.recordVideo');
-    assert.equal(video.color, undefined);
+    assert.equal(video().command, 'mauideploy.recordVideo');
+    assert.equal(items.get('mauideploy.tools').color, undefined);
     screenshotBusy(true);
-    assert.equal(video.command, undefined);
+    assert.equal(video().enabled, false);
     screenshotBusy(false);
-    assert.equal(video.command, 'mauideploy.recordVideo');
+    assert.equal(video().enabled, true);
+    assert.ok(updates > 10);
 });
 
 test('command opens the chosen screenshot independently of the deployment target and retains preview on clipboard failure', { skip: process.platform !== 'darwin' }, async context => {
@@ -487,11 +510,13 @@ test('video command records a USB iPhone without Python, saves MP4 and retains p
         assert.equal(options.signal.aborted, true);
         throw new Error('cancelled');
     };
+    const cancellationLogStart = log.length;
     await commands.get('mauideploy.recordVideo')();
     assert.equal(saves, 4);
     assert.equal(revealed.length, 3);
     assert.deepEqual(states.slice(-4), ['preparing', 'recording', 'cancelling', 'idle']);
     assert.ok(log.includes('Video cancelled.'));
+    assert.ok(!log.slice(cancellationLogStart).some(line => line.startsWith('Failed to ')));
     for (const subscription of extensionContext.subscriptions) { subscription.dispose(); }
     assert.equal(disposed, 2);
 });
