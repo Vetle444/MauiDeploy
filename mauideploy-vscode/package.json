@@ -2,7 +2,7 @@
   "name": "maui-deploy",
   "displayName": "MauiDeploy",
   "description": "A focused tools window for deploying, debugging, capturing, and inspecting .NET MAUI apps",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "author": "FinstadProductions",
   "publisher": "FinstadProductions",
   "license": "MIT",

@@ -2,6 +2,11 @@
 
 All notable changes to MAUI Deploy are documented in this file.
 
+## 2.1.0 - 2026-09-25
+
+### Fixed
+- Greatly reduce CPU and energy use in the USB iPhone Live Device Preview. Frames are now composited directly by Core Animation instead of being redrawn and color-converted on the CPU, and paused previews no longer render incoming frames.
+
 ## 2.0.0 - 2026-09-24
 
 ### Added

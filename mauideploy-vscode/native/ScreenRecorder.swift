@@ -135,7 +135,9 @@ struct PreviewControlsView: View {
 
 final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureFileOutputRecordingDelegate {
     let window: NSWindow
-    let imageView = NSImageView()
+    let screenView = NSView()
+    let screenLayer = CALayer()
+    private(set) var displayedFrame: CVPixelBuffer?
     let controls: NSHostingView<PreviewControlsView>
     let captureControls: PreviewControlsModel
     private let status = NSTextField(labelWithString: "Connecting...")
@@ -189,12 +191,15 @@ final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureV
         if let visible = NSScreen.main?.visibleFrame {
             window.setContentSize(NSSize(width: min(410, visible.width - 40), height: min(800, visible.height - 80)))
         }
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        imageView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        imageView.wantsLayer = true
-        imageView.layer?.backgroundColor = NSColor.black.cgColor
-        imageView.setAccessibilityLabel("Device screen")
+        // Frames stay GPU-side as IOSurface contents; drawing them as images cost over a CPU core.
+        screenLayer.backgroundColor = NSColor.black.cgColor
+        screenLayer.contentsGravity = .resizeAspect
+        screenLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull()]
+        screenView.layer = screenLayer
+        screenView.wantsLayer = true
+        screenView.setAccessibilityElement(true)
+        screenView.setAccessibilityRole(.image)
+        screenView.setAccessibilityLabel("Device screen")
         status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
@@ -222,7 +227,7 @@ final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureV
         backdrop.blendingMode = .behindWindow
         backdrop.state = .active
         guard let content = window.contentView else { return }
-        for view in [backdrop, imageView, header, controls] {
+        for view in [backdrop, screenView, header, controls] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
@@ -241,10 +246,10 @@ final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureV
             heading.centerXAnchor.constraint(equalTo: header.centerXAnchor, constant: 20),
             heading.leadingAnchor.constraint(greaterThanOrEqualTo: header.leadingAnchor, constant: 72),
             heading.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor, constant: -16),
-            imageView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            imageView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            imageView.topAnchor.constraint(equalTo: header.bottomAnchor),
-            imageView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.footerHeight),
+            screenView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            screenView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            screenView.topAnchor.constraint(equalTo: header.bottomAnchor),
+            screenView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Self.footerHeight),
             controls.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             controls.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8),
             controls.widthAnchor.constraint(equalToConstant: 216),
@@ -344,26 +349,18 @@ final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureV
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let frame = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         frameLock.lock()
         if framePending { frameLock.unlock(); return }
         framePending = true
         frameLock.unlock()
-        guard let pixels = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            frameLock.lock(); framePending = false; frameLock.unlock()
-            return
-        }
-        let image = CIImage(cvPixelBuffer: pixels)
-        guard let rendered = imageContext.createCGImage(image, from: image.extent) else {
-            frameLock.lock(); framePending = false; frameLock.unlock()
-            return
-        }
         DispatchQueue.main.async {
             defer { self.frameLock.lock(); self.framePending = false; self.frameLock.unlock() }
-            self.presentFrame(rendered)
+            self.presentFrame(frame)
         }
     }
 
-    func presentFrame(_ image: CGImage) {
+    func presentFrame(_ frame: CVPixelBuffer) {
         guard !closing && !disconnected else { return }
         if !live {
             live = true
@@ -371,14 +368,20 @@ final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureV
             updateStatus("started")
             emit(["event": "started"])
         }
-        if !paused {
-            imageView.image = NSImage(cgImage: image, size: .zero)
-            let aspectRatio = CGFloat(image.width) / CGFloat(image.height)
-            if displayedAspectRatio == nil || abs(aspectRatio - displayedAspectRatio!) > 0.01 {
-                displayedAspectRatio = aspectRatio
-                fitDevice(aspectRatio: aspectRatio)
-            }
+        guard !paused else { return }
+        guard let surface = CVPixelBufferGetIOSurface(frame)?.takeUnretainedValue() else { return }
+        displayedFrame = frame
+        screenLayer.contents = surface
+        let aspectRatio = CGFloat(CVPixelBufferGetWidth(frame)) / CGFloat(CVPixelBufferGetHeight(frame))
+        if displayedAspectRatio == nil || abs(aspectRatio - displayedAspectRatio!) > 0.01 {
+            displayedAspectRatio = aspectRatio
+            fitDevice(aspectRatio: aspectRatio)
         }
+    }
+
+    private func clearFrame() {
+        displayedFrame = nil
+        screenLayer.contents = nil
     }
 
     private func fitDevice(aspectRatio: CGFloat) {
@@ -401,7 +404,7 @@ final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureV
     func disconnect() {
         disconnected = true
         live = false
-        imageView.image = nil
+        clearFrame()
         recordingTimer?.invalidate()
         updateButtons()
         updateStatus("disconnected")
@@ -425,7 +428,8 @@ final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureV
         capturePending = true
         updateButtons()
         updateStatus("screenshotRequested")
-        guard let image = imageView.image?.cgImage(forProposedRect: nil, context: nil, hints: nil),
+        let snapshot = displayedFrame.map { CIImage(cvPixelBuffer: $0) }
+        guard let snapshot, let image = imageContext.createCGImage(snapshot, from: snapshot.extent),
               let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]),
               data.count <= 32 * 1024 * 1024 else {
             completeCapture(success: false)
@@ -547,7 +551,7 @@ final class DevicePreview: NSObject, DeviceCapture, NSWindowDelegate, AVCaptureV
     func stop() {
         guard !closing else { return }
         closing = true
-        imageView.image = nil
+        clearFrame()
         recordingTimer?.invalidate()
         movieExport?.cancelExport()
         FileHandle.standardInput.readabilityHandler = nil

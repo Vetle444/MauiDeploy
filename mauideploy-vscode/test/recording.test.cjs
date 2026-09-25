@@ -859,17 +859,26 @@ require(preview.window.standardWindowButton(.zoomButton)?.isHidden == true, "Ful
 require(preview.controls.rootView.model === preview.captureControls, "Native controls are not connected to capture state")
 require(!preview.captureControls.screenshotEnabled && !preview.captureControls.recordEnabled, "Capture controls enabled before a frame")
 let context = CIContext()
-let portrait = context.createCGImage(CIImage(color: CIColor(red: 0.1, green: 0.7, blue: 0.6)), from: CGRect(x: 0, y: 0, width: 320, height: 568))!
-let landscape = context.createCGImage(CIImage(color: CIColor(red: 0.9, green: 0.3, blue: 0.2)), from: CGRect(x: 0, y: 0, width: 568, height: 320))!
+func frame(_ image: CIImage, width: Int, height: Int) -> CVPixelBuffer {
+    var buffer: CVPixelBuffer?
+    let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary
+    require(CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attributes, &buffer) == kCVReturnSuccess, "Synthetic frame unavailable")
+    context.render(image, to: buffer!)
+    return buffer!
+}
+func displays(_ frame: CVPixelBuffer) -> Bool {
+    preview.displayedFrame === frame && (preview.screenLayer.contents as AnyObject?) === CVPixelBufferGetIOSurface(frame)?.takeUnretainedValue()
+}
+let portrait = frame(CIImage(color: CIColor(red: 0.1, green: 0.7, blue: 0.6)), width: 320, height: 568)
+let landscape = frame(CIImage(color: CIColor(red: 0.9, green: 0.3, blue: 0.2)), width: 568, height: 320)
 preview.presentFrame(portrait)
 preview.window.contentView!.layoutSubtreeIfNeeded()
-require(abs(preview.imageView.frame.width / preview.imageView.frame.height - 320.0 / 568.0) < 0.003, "Initial phone fit leaves side bars")
-let initial = preview.imageView.image
-require(initial?.size == NSSize(width: 320, height: 568), "Portrait dimensions missing")
+require(abs(preview.screenView.frame.width / preview.screenView.frame.height - 320.0 / 568.0) < 0.003, "Initial phone fit leaves side bars")
+require(displays(portrait), "Portrait frame is not shown from its IOSurface")
 preview.captureControls.pause()
 require(preview.captureControls.paused, "Pause control is not connected")
 preview.presentFrame(landscape)
-require(preview.imageView.image === initial, "Pause did not hold the displayed frame")
+require(displays(portrait), "Pause did not hold the displayed frame")
 preview.captureControls.screenshot()
 preview.captureControls.screenshot()
 require(!preview.captureControls.screenshotEnabled, "Screenshot button stayed enabled while copying")
@@ -882,19 +891,19 @@ require(preview.captureControls.recordEnabled, "Record control did not recover f
 preview.captureControls.pause()
 require(!preview.captureControls.paused, "Resume control is not connected")
 preview.presentFrame(landscape)
-require(preview.imageView.image?.size == NSSize(width: 568, height: 320), "Resume or rotation failed")
+require(displays(landscape), "Resume or rotation failed")
 preview.window.contentView!.layoutSubtreeIfNeeded()
-require(abs(preview.imageView.frame.width / preview.imageView.frame.height - 568.0 / 320.0) < 0.003, "Landscape fit: \\(preview.imageView.frame), content: \\(preview.window.contentView!.bounds)")
+require(abs(preview.screenView.frame.width / preview.screenView.frame.height - 568.0 / 320.0) < 0.003, "Landscape fit: \\(preview.screenView.frame), content: \\(preview.window.contentView!.bounds)")
 for size in [NSSize(width: 280, height: 400), NSSize(width: 1100, height: 650)] {
     preview.window.setContentSize(size)
     let content = preview.window.contentView!
     content.layoutSubtreeIfNeeded()
-    require(content.bounds.contains(preview.imageView.frame), "Preview outside window: \\(preview.imageView.frame), content: \\(content.bounds)")
-    require(preview.imageView.frame.height > 100, "Preview has no usable height")
+    require(content.bounds.contains(preview.screenView.frame), "Preview outside window: \\(preview.screenView.frame), content: \\(content.bounds)")
+    require(preview.screenView.frame.height > 100, "Preview has no usable height")
     let controls = preview.controls
     let controlsInContent = controls.convert(controls.bounds, to: content)
     require(content.bounds.contains(controlsInContent), "Controls outside window")
-    require(!preview.imageView.frame.intersects(controlsInContent), "Controls overlap preview")
+    require(!preview.screenView.frame.intersects(controlsInContent), "Controls overlap preview")
 }
 preview.presentFrame(portrait)
 let content = preview.window.contentView!
@@ -938,7 +947,8 @@ let sample = NSImage(size: NSSize(width: 390, height: 844), flipped: true) { bou
     NSBezierPath(roundedRect: NSRect(x: 130, y: 828, width: 130, height: 5), xRadius: 2.5, yRadius: 2.5).fill()
     return true
 }
-let sampleFrame = sample.cgImage(forProposedRect: nil, context: nil, hints: nil)!
+let sampleImage = sample.cgImage(forProposedRect: nil, context: nil, hints: nil)!
+let sampleFrame = frame(CIImage(cgImage: sampleImage), width: sampleImage.width, height: sampleImage.height)
 preview.presentFrame(sampleFrame)
 for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (NSAppearance.Name.darkAqua, "dark")] {
     preview.window.appearance = NSAppearance(named: appearance)
@@ -951,7 +961,7 @@ for (appearance, suffix) in [(NSAppearance.Name.aqua, "light"), (NSAppearance.Na
 func completeValidation() {
     preview.disconnect()
     preview.presentFrame(portrait)
-    require(preview.imageView.image == nil, "Disconnected preview leaked a queued frame")
+    require(preview.displayedFrame == nil && preview.screenLayer.contents == nil, "Disconnected preview leaked a queued frame")
     print("Native preview rendering, pause, rotation, sizing and disconnect checks passed.")
     exit(0)
 }
